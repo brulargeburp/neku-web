@@ -8,11 +8,13 @@ export interface Breaker {
   voltage1: number;
   voltage2: number;
   isOverall: boolean;
+  maxVoltage?: number;
 }
 
 export interface HistoryLog {
   breakerName: string;
   timestamp: string; // ISO 8601 string format
+  type: 'activated' | 'deactivated';
 }
 
 

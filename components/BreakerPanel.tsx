@@ -1,15 +1,39 @@
 
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import type { Breaker } from '../types';
 
 interface BreakerPanelProps {
   breaker: Breaker;
   onToggle: (id: string, newState: boolean) => void;
   isMasterOn: boolean;
+  onSetMaxVoltage: (id: string, value: number) => void;
 }
 
-const BreakerPanel: React.FC<BreakerPanelProps> = ({ breaker, onToggle, isMasterOn }) => {
-  const { id, name, isOn, voltage1Label, voltage2Label, voltage1, voltage2, isOverall } = breaker;
+const BreakerPanel: React.FC<BreakerPanelProps> = ({ breaker, onToggle, isMasterOn, onSetMaxVoltage }) => {
+  const { id, name, isOn, voltage1Label, voltage2Label, voltage1, voltage2, isOverall, maxVoltage } = breaker;
+
+  const [editableMaxVoltage, setEditableMaxVoltage] = useState<string>(maxVoltage?.toFixed(2) ?? '5.00');
+
+  useEffect(() => {
+    // Sync local state if the prop changes from above
+    setEditableMaxVoltage(maxVoltage?.toFixed(2) ?? '5.00');
+  }, [maxVoltage]);
+
+  const handleMaxVoltageBlur = () => {
+    const value = parseFloat(editableMaxVoltage);
+    if (!isNaN(value) && value >= 0 && value !== maxVoltage) {
+      onSetMaxVoltage(id, value);
+    } else {
+      // Revert to original value if input is invalid or unchanged
+      setEditableMaxVoltage(maxVoltage?.toFixed(2) ?? '5.00');
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      (e.target as HTMLInputElement).blur(); // Triggers onBlur
+    }
+  };
 
   const canTurnOn = isOverall || isMasterOn;
 
@@ -41,18 +65,45 @@ const BreakerPanel: React.FC<BreakerPanelProps> = ({ breaker, onToggle, isMaster
         </div>
       </div>
       <div className="grid grid-cols-2 gap-4">
-        <div className="bg-gray-900/70 p-4 rounded-lg border border-gray-600/50">
-          <h3 className="text-gray-400 text-xs font-light uppercase tracking-widest mb-2">{voltage1Label}</h3>
-          <div className="font-orbitron text-3xl text-green-400 drop-shadow-[0_0_5px_#00ff7f]">
-            {voltage1.toFixed(2)} V
-          </div>
-        </div>
-        <div className="bg-gray-900/70 p-4 rounded-lg border border-gray-600/50">
-          <h3 className="text-gray-400 text-xs font-light uppercase tracking-widest mb-2">{voltage2Label}</h3>
-          <div className="font-orbitron text-3xl text-green-400 drop-shadow-[0_0_5px_#00ff7f]">
-            {voltage2.toFixed(2)} V
-          </div>
-        </div>
+        {isOverall ? (
+          <>
+            <div className="bg-gray-900/70 p-4 rounded-lg border border-gray-600/50">
+              <h3 className="text-gray-400 text-xs font-light uppercase tracking-widest mb-2">{voltage1Label}</h3>
+              <div className="font-orbitron text-3xl text-green-400 drop-shadow-[0_0_5px_#00ff7f]">
+                {voltage1.toFixed(2)} V
+              </div>
+            </div>
+            <div className="bg-gray-900/70 p-4 rounded-lg border border-gray-600/50">
+              <h3 className="text-gray-400 text-xs font-light uppercase tracking-widest mb-2">{voltage2Label}</h3>
+              <div className="font-orbitron text-3xl text-green-400 drop-shadow-[0_0_5px_#00ff7f]">
+                {voltage2.toFixed(2)} V
+              </div>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="bg-gray-900/70 p-4 rounded-lg border border-gray-600/50">
+              <h3 className="text-gray-400 text-xs font-light uppercase tracking-widest mb-2">Load Voltage</h3>
+              <div className="font-orbitron text-3xl text-green-400 drop-shadow-[0_0_5px_#00ff7f]">
+                {voltage1.toFixed(2)} V
+              </div>
+            </div>
+            <div className="bg-gray-900/70 p-4 rounded-lg border border-gray-600/50">
+              <h3 className="text-gray-400 text-xs font-light uppercase tracking-widest mb-2">Max Voltage</h3>
+              <input
+                type="number"
+                value={editableMaxVoltage}
+                onChange={(e) => setEditableMaxVoltage(e.target.value)}
+                onBlur={handleMaxVoltageBlur}
+                onKeyDown={handleKeyDown}
+                className="font-orbitron text-3xl text-green-400 bg-transparent w-full text-center outline-none p-0 border-0 drop-shadow-[0_0_5px_#00ff7f]"
+                aria-label="Set maximum voltage"
+                step="0.1"
+                min="0"
+              />
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
