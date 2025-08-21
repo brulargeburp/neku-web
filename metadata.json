@@ -1,0 +1,5 @@
+{
+  "name": "IoT Circuit Breaker Control Panel",
+  "description": "A futuristic dashboard to monitor and control an IoT circuit breaker with a main switch and three independent loads. It provides real-time voltage readings and status indicators.",
+  "requestFramePermissions": []
+}
