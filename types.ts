@@ -10,6 +10,12 @@ export interface Breaker {
   isOverall: boolean;
 }
 
+export interface HistoryLog {
+  breakerName: string;
+  timestamp: string; // ISO 8601 string format
+}
+
+
 // --- Web Serial API type placeholders ---
 // These are minimal definitions to resolve type errors in this application,
 // as the official types might not be included in all default tsconfig setups.

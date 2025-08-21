@@ -1,7 +1,8 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import BreakerPanel from './components/BreakerPanel';
-import type { Breaker } from './types';
+import HistoryModal from './components/HistoryModal';
+import type { Breaker, HistoryLog } from './types';
 
 // Data Protocol (assumes device sends a consistent data packet)
 // This should match the firmware on your HC-05 connected device.
@@ -27,11 +28,25 @@ const App: React.FC = () => {
   const [isConnecting, setIsConnecting] = useState<boolean>(false);
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [isHistoryVisible, setIsHistoryVisible] = useState<boolean>(false);
+  const [historyLogs, setHistoryLogs] = useState<HistoryLog[]>([]);
   
   const portRef = useRef<SerialPort | null>(null);
   const writerRef = useRef<WritableStreamDefaultWriter<Uint8Array> | null>(null);
   const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
   const keepReadingRef = useRef<boolean>(false);
+
+  // Load history from localStorage on initial render
+  useEffect(() => {
+    try {
+      const storedLogs = localStorage.getItem('nekuNamiHistory');
+      if (storedLogs) {
+        setHistoryLogs(JSON.parse(storedLogs));
+      }
+    } catch (e) {
+      console.error("Failed to load history logs from localStorage", e);
+    }
+  }, []);
 
   const onDisconnected = useCallback(() => {
     setIsConnected(false);
@@ -53,12 +68,43 @@ const App: React.FC = () => {
       const statusMask = value.getUint8(0);
       const systemVoltage = value.getFloat32(1, true); // true for little-endian
 
-      setBreakers(prev => [
-        { ...prev[0], isOn: (statusMask & 1) > 0, voltage1: systemVoltage, voltage2: value.getFloat32(5, true) },
-        { ...prev[1], isOn: (statusMask & 2) > 0, voltage1: systemVoltage, voltage2: value.getFloat32(9, true) },
-        { ...prev[2], isOn: (statusMask & 4) > 0, voltage1: systemVoltage, voltage2: value.getFloat32(13, true) },
-        { ...prev[3], isOn: (statusMask & 8) > 0, voltage1: systemVoltage, voltage2: value.getFloat32(17, true) },
-      ]);
+      setBreakers(prevBreakers => {
+        const newBreakers: Breaker[] = [
+          { ...prevBreakers[0], isOn: (statusMask & 1) > 0, voltage1: systemVoltage, voltage2: value.getFloat32(5, true) },
+          { ...prevBreakers[1], isOn: (statusMask & 2) > 0, voltage1: systemVoltage, voltage2: value.getFloat32(9, true) },
+          { ...prevBreakers[2], isOn: (statusMask & 4) > 0, voltage1: systemVoltage, voltage2: value.getFloat32(13, true) },
+          { ...prevBreakers[3], isOn: (statusMask & 8) > 0, voltage1: systemVoltage, voltage2: value.getFloat32(17, true) },
+        ];
+
+        // --- History Logging ---
+        const newLogEntries: HistoryLog[] = [];
+        newBreakers.forEach((newBreaker, index) => {
+          const oldBreaker = prevBreakers[index];
+          // Log if a breaker state changes from ON to OFF
+          if (oldBreaker.isOn && !newBreaker.isOn) {
+            newLogEntries.push({
+              breakerName: newBreaker.name,
+              timestamp: new Date().toISOString(),
+            });
+          }
+        });
+
+        if (newLogEntries.length > 0) {
+          setHistoryLogs(currentLogs => {
+            // Add new logs to the beginning of the array
+            const updatedLogs = [...newLogEntries.reverse(), ...currentLogs];
+            try {
+              localStorage.setItem('nekuNamiHistory', JSON.stringify(updatedLogs));
+            } catch (e) {
+              console.error("Failed to save history logs to localStorage", e);
+            }
+            return updatedLogs;
+          });
+        }
+        // --- End History Logging ---
+        
+        return newBreakers;
+      });
     } catch (e) {
       console.error("Failed to parse status update:", e);
       setError("Received malformed data from device.");
@@ -74,17 +120,16 @@ const App: React.FC = () => {
                 if (done) {
                     break;
                 }
-                // NOTE: This assumes each `value` chunk is a complete data packet.
-                // For more robust applications, you would buffer incoming data
-                // and parse it for start/end of packet markers.
                 handleStatusUpdate(value);
             }
         } catch (error) {
             console.error('Read loop error:', error);
             setError('Device communication error.');
         } finally {
-            readerRef.current.releaseLock();
-            readerRef.current = null;
+            if (readerRef.current) {
+              readerRef.current.releaseLock();
+              readerRef.current = null;
+            }
         }
     }
   }
@@ -99,7 +144,7 @@ const App: React.FC = () => {
 
     try {
       const port = await navigator.serial.requestPort();
-      await port.open({ baudRate: 9600 }); // Common for HC-05
+      await port.open({ baudRate: 9600 });
       
       portRef.current = port;
       port.addEventListener('disconnect', onDisconnected);
@@ -113,7 +158,7 @@ const App: React.FC = () => {
 
     } catch (e) {
       console.error('Connection failed:', e);
-      setError(`Failed to connect: ${e.message}`);
+      setError(`Failed to connect: ${(e as Error).message}`);
       onDisconnected();
     } finally {
       setIsConnecting(false);
@@ -123,7 +168,6 @@ const App: React.FC = () => {
   const handleDisconnect = async () => {
     keepReadingRef.current = false;
     
-    // Attempt to cancel the reader and unlock the stream
     if (readerRef.current) {
         try {
            await readerRef.current.cancel();
@@ -156,9 +200,6 @@ const App: React.FC = () => {
         setError("Device is not connected.");
         return;
     }
-    // Command Protocol: 2 bytes
-    // Byte 0: Breaker index (0=Overall, 1=Load1, ...)
-    // Byte 1: State (0=OFF, 1=ON)
     const breakerIndex = INITIAL_BREAKERS.findIndex(b => b.id === id);
     if (breakerIndex === -1) return;
 
@@ -167,10 +208,10 @@ const App: React.FC = () => {
         await writerRef.current.write(command);
     } catch (e) {
         console.error("Failed to send command:", e);
-        setError(`Failed to send command: ${e.message}`);
-        handleDisconnect(); // Disconnect on write error
+        setError(`Failed to send command: ${(e as Error).message}`);
+        handleDisconnect();
     }
-  }, []);
+  }, [handleDisconnect]);
   
   useEffect(() => {
     return () => {
@@ -178,42 +219,63 @@ const App: React.FC = () => {
             handleDisconnect();
         }
     };
-  }, []);
+  }, [handleDisconnect]);
 
   return (
-    <main className="text-gray-100 min-h-screen w-full flex flex-col items-center justify-center p-4 sm:p-6 md:p-10">
-      <div className="max-w-7xl w-full">
-        <header className="text-center mb-8">
-            <h1 className="font-orbitron text-3xl sm:text-4xl text-green-400 mb-4 tracking-wider uppercase">IoT Control Panel</h1>
-            <div className="h-10">
-              {!isConnected && !isConnecting && (
-                  <button onClick={handleConnect} className="font-orbitron text-white font-bold py-3 px-6 rounded-lg bg-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.4)] hover:bg-blue-400 hover:shadow-[0_0_20px_rgba(59,130,246,0.6)] transition-all duration-300">
-                    Connect via Serial Port
-                  </button>
-              )}
-              {isConnecting && <p className="text-yellow-400 text-lg animate-pulse">Connecting...</p>}
-              {isConnected && (
-                  <button onClick={handleDisconnect} className="font-orbitron text-white font-bold py-3 px-6 rounded-lg bg-red-500 shadow-[0_0_15px_rgba(255,65,65,0.4)] hover:bg-red-400 hover:shadow-[0_0_20px_rgba(255,65,65,0.6)] transition-all duration-300">
-                    Disconnect
-                  </button>
-              )}
+    <>
+      <main className="text-gray-100 min-h-screen w-full flex flex-col items-center justify-center p-4 sm:p-6 md:p-10">
+        <div className="max-w-7xl w-full relative">
+          <header className="text-center mb-8">
+              <h1 className="font-orbitron text-3xl sm:text-4xl text-green-400 mb-4 tracking-wider uppercase">Neku-Nami Control Panel</h1>
+              <div className="h-10">
+                {!isConnected && !isConnecting && (
+                    <button onClick={handleConnect} className="font-orbitron text-white font-bold py-3 px-6 rounded-lg bg-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.4)] hover:bg-blue-400 hover:shadow-[0_0_20px_rgba(59,130,246,0.6)] transition-all duration-300">
+                      Connect via Serial Port
+                    </button>
+                )}
+                {isConnecting && <p className="text-yellow-400 text-lg animate-pulse">Connecting...</p>}
+                {isConnected && (
+                    <button onClick={handleDisconnect} className="font-orbitron text-white font-bold py-3 px-6 rounded-lg bg-red-500 shadow-[0_0_15px_rgba(255,65,65,0.4)] hover:bg-red-400 hover:shadow-[0_0_20px_rgba(255,65,65,0.6)] transition-all duration-300">
+                      Disconnect
+                    </button>
+                )}
+              </div>
+              {error && <p className="text-red-500 mt-2 h-5">{error}</p>}
+          </header>
+
+          <div className="absolute top-0 right-0">
+              <button
+                onClick={() => setIsHistoryVisible(true)}
+                title="View Activation History"
+                className="p-2 rounded-full text-green-400 hover:bg-green-400/20 transition-colors duration-300"
+                aria-label="View history"
+              >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+              </button>
+          </div>
+
+          <div className={`transition-opacity duration-500 ${!isConnected ? 'opacity-40 pointer-events-none' : 'opacity-100'}`}>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 lg:gap-10">
+              {breakers.map(breaker => (
+                <BreakerPanel
+                  key={breaker.id}
+                  breaker={breaker}
+                  onToggle={handleToggle}
+                  isMasterOn={breakers[0].isOn}
+                />
+              ))}
             </div>
-            {error && <p className="text-red-500 mt-2 h-5">{error}</p>}
-        </header>
-        <div className={`transition-opacity duration-500 ${!isConnected ? 'opacity-40 pointer-events-none' : 'opacity-100'}`}>
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 lg:gap-10">
-            {breakers.map(breaker => (
-              <BreakerPanel
-                key={breaker.id}
-                breaker={breaker}
-                onToggle={handleToggle}
-                isMasterOn={breakers[0].isOn}
-              />
-            ))}
           </div>
         </div>
-      </div>
-    </main>
+      </main>
+      <HistoryModal
+        isOpen={isHistoryVisible}
+        onClose={() => setIsHistoryVisible(false)}
+        logs={historyLogs}
+      />
+    </>
   );
 };
 
