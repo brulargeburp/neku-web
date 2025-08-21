@@ -6,9 +6,10 @@ interface HistoryModalProps {
   isOpen: boolean;
   onClose: () => void;
   logs: HistoryLog[];
+  onClearHistory: () => void;
 }
 
-const HistoryModal: React.FC<HistoryModalProps> = ({ isOpen, onClose, logs }) => {
+const HistoryModal: React.FC<HistoryModalProps> = ({ isOpen, onClose, logs, onClearHistory }) => {
   if (!isOpen) {
     return null;
   }
@@ -59,6 +60,17 @@ const HistoryModal: React.FC<HistoryModalProps> = ({ isOpen, onClose, logs }) =>
             </ul>
           )}
         </div>
+
+        <footer className="p-4 border-t border-gray-600/50 flex justify-end">
+          <button
+            onClick={onClearHistory}
+            disabled={logs.length === 0}
+            className="font-orbitron text-white text-sm font-bold py-2 px-4 rounded-lg bg-red-600 shadow-[0_0_10px_rgba(255,65,65,0.3)] hover:bg-red-500 hover:shadow-[0_0_15px_rgba(255,65,65,0.5)] disabled:bg-gray-600/50 disabled:shadow-none disabled:cursor-not-allowed transition-all duration-300"
+            aria-label="Clear all history logs"
+          >
+            Clear History
+          </button>
+        </footer>
       </div>
     </div>
   );

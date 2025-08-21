@@ -354,6 +354,17 @@ const App: React.FC = () => {
     };
   }, [handleDisconnect]);
 
+  const handleClearHistory = () => {
+    if (window.confirm('Are you sure you want to permanently delete all history logs?')) {
+        setHistoryLogs([]);
+        try {
+            localStorage.removeItem('nekuNamiHistory');
+        } catch (e) {
+            console.error("Failed to clear history logs from localStorage", e);
+        }
+    }
+  };
+
   return (
     <>
       <main className="text-gray-100 min-h-screen w-full flex flex-col items-center justify-center p-4 sm:p-6 md:p-10">
@@ -419,6 +430,7 @@ const App: React.FC = () => {
         isOpen={isHistoryVisible}
         onClose={() => setIsHistoryVisible(false)}
         logs={historyLogs}
+        onClearHistory={handleClearHistory}
       />
     </>
   );
