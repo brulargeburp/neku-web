@@ -9,12 +9,15 @@ export interface Breaker {
   current2: number;
   isOverall: boolean;
   maxCurrent?: number;
+  minCurrent?: number;
+  lastTripReason?: string;
 }
 
 export interface HistoryLog {
   breakerName: string;
   timestamp: string; // ISO 8601 string format
   type: 'activated' | 'deactivated';
+  reason: string;
 }
 
 

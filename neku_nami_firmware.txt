@@ -1,32 +1,42 @@
+
 /**
  * Neku-Nami Control Panel Firmware (Current-Based)
  * 
  * This firmware communicates with the Neku-Nami web application. It manages
- * four circuit breakers, reads sensor data (current/amperage), and uses a dynamic 
- * auto-trip threshold based on current that can be configured in real-time 
- * from the web app. This is based on the principle that overloads and short
- * circuits are defined by excessive current flow.
+ * three circuit breakers (1 main, 2 loads), reads sensor data (current/amperage), 
+ * and uses a dynamic auto-trip threshold based on current that can be configured 
+ * in real-time from the web app.
  * 
  * --- Web App Communication Protocol ---
  * 
- * ---> Outgoing Data Packet to Web App (21 bytes) --->
- * Byte 0:    Status Mask (Bit 0: Overall, Bit 1: Load 1, etc.)
+ * Note on Admin Mode: The "Admin Mode" password lock is a client-side safety 
+ * feature implemented purely within the web application. It prevents the app 
+ * from sending 'Set Min/Max Current' commands unless unlocked. The firmware 
+ * itself does not have an admin state and will process these commands at any 
+ * time if they are received.
+ *
+ * ---> Outgoing Data Packet to Web App (17 bytes) --->
+ * Byte 0:    Status Mask (Bit 0: Overall, Bit 1: Load 1, Bit 2: Load 2)
  * Bytes 1-4:   System Current (float in Amperes)
  * Bytes 5-8:   Total Load Current (float in Amperes, placeholder)
  * Bytes 9-12:  Load 1 Current (float in Amperes)
  * Bytes 13-16: Load 2 Current (float in Amperes, placeholder)
- * Bytes 17-20: Load 3 Current (float in Amperes, placeholder)
  *
  * <--- Incoming Command Packets from Web App <---
  * 1. Toggle State (3 bytes):
  *    Byte 0: Command Type (0x01)
- *    Byte 1: Breaker Index (0-3)
+ *    Byte 1: Breaker Index (0-2)
  *    Byte 2: New State (0=OFF, 1=ON)
  * 
  * 2. Set Max Current (6 bytes):
  *    Byte 0: Command Type (0x02)
- *    Byte 1: Breaker Index (1-3)
+ *    Byte 1: Breaker Index (1-2)
  *    Bytes 2-5: Max Current (float in Amperes)
+ * 
+ * 3. Set Min Current (6 bytes):
+ *    Byte 0: Command Type (0x03)
+ *    Byte 1: Breaker Index (1-2)
+ *    Bytes 2-5: Min Current (float in Amperes)
  */
 
 // --- Pin Definitions (assuming ammeters like ACS712) ---
@@ -35,15 +45,16 @@ const int dcSystem_currentSensorPin = A1;
 const int transistorPinLoad1 = 2;
 const int transistorPinOverall = 3;
 const int transistorPinLoad2 = 4;
-const int transistorPinLoad3 = 5;
 
 // --- Command Definitions ---
 const uint8_t CMD_TOGGLE_STATE = 0x01;
 const uint8_t CMD_SET_MAX_CURRENT = 0x02;
+const uint8_t CMD_SET_MIN_CURRENT = 0x03;
 
 // --- State Management ---
-bool breakerIsOn[4] = {false, false, false, false};
-float maxCurrents[4] = {0.0, 5.0, 5.0, 5.0}; // Default max current for Loads 1, 2, 3 is 5.0A
+bool breakerIsOn[3] = {false, false, false};
+float maxCurrents[3] = {0.0, 5.0, 5.0}; // Default max current for Loads 1 & 2 is 5.0A
+float minCurrents[3] = {0.0, 0.1, 0.1}; // Default min current for Loads 1 & 2 is 0.1A
 
 // --- Calibration Values (example for ACS712-20A) ---
 // VCC/2 offset, i.e., 2.5V for 0A on a 5V Arduino
@@ -60,12 +71,10 @@ void setup() {
   pinMode(transistorPinLoad1, OUTPUT);
   pinMode(transistorPinOverall, OUTPUT);
   pinMode(transistorPinLoad2, OUTPUT);
-  pinMode(transistorPinLoad3, OUTPUT);
   // Initialize all circuits to OFF state (HIGH for PNP transistors)
   digitalWrite(transistorPinLoad1, HIGH);
   digitalWrite(transistorPinOverall, HIGH);
   digitalWrite(transistorPinLoad2, HIGH);
-  digitalWrite(transistorPinLoad3, HIGH);
 }
 
 void loop() {
@@ -102,13 +111,21 @@ void handleSerialCommands() {
       Serial.readBytes(payload, 5);
       int breakerIndex = payload[0];
 
-      if (breakerIndex > 0 && breakerIndex < 4) { // Only for loads 1-3
-        union {
-          float f;
-          uint8_t bytes[4];
-        } converter;
+      if (breakerIndex > 0 && breakerIndex < 3) {
+        union { float f; uint8_t bytes[4]; } converter;
         memcpy(converter.bytes, &payload[1], 4);
         maxCurrents[breakerIndex] = converter.f;
+      }
+    }
+    else if (commandType == CMD_SET_MIN_CURRENT && Serial.available() >= 5) {
+      uint8_t payload[5];
+      Serial.readBytes(payload, 5);
+      int breakerIndex = payload[0];
+
+      if (breakerIndex > 0 && breakerIndex < 3) {
+        union { float f; uint8_t bytes[4]; } converter;
+        memcpy(converter.bytes, &payload[1], 4);
+        minCurrents[breakerIndex] = converter.f;
       }
     }
   }
@@ -117,24 +134,29 @@ void handleSerialCommands() {
 void updateBreakerLogic() {
   float dcLoad_current = readCurrent(dcLoad_currentSensorPin);
 
-  // Auto-trip logic for "Load 1" using the dynamic max current
-  // If current exceeds the set maximum, the breaker is tripped (turned off).
-  // It will NOT automatically turn back on. A user command is required.
-  if (breakerIsOn[1] && dcLoad_current >= maxCurrents[1]) {
-    setBreakerState(1, false); // Trip the breaker
+  // Auto-trip logic for "Load 1"
+  if (breakerIsOn[1]) {
+    // Overload Trip: current is too high.
+    if (dcLoad_current >= maxCurrents[1]) {
+      setBreakerState(1, false);
+    }
+    // Underload/Short-Circuit Trip: current is too low (but not zero).
+    else if (dcLoad_current > 0 && dcLoad_current < minCurrents[1]) {
+      setBreakerState(1, false);
+    }
   }
   // This logic could be expanded for other loads if they get physical sensors.
 }
 
 void setBreakerState(int index, bool isOn) {
-  if (index < 0 || index > 3) return;
+  if (index < 0 || index > 2) return;
 
   if (index == 0) { // Overall breaker logic
     breakerIsOn[0] = isOn;
     digitalWrite(transistorPinOverall, isOn ? LOW : HIGH);
     // If the main breaker is turned off, all sub-breakers are also turned off.
     if (!isOn) {
-      for (int i = 1; i < 4; i++) {
+      for (int i = 1; i < 3; i++) {
         setBreakerState(i, false);
       }
     }
@@ -147,14 +169,13 @@ void setBreakerState(int index, bool isOn) {
     int pin = 0;
     if (index == 1) pin = transistorPinLoad1;
     if (index == 2) pin = transistorPinLoad2;
-    if (index == 3) pin = transistorPinLoad3;
     digitalWrite(pin, isOn ? LOW : HIGH);
   }
 }
 
 void sendDataPacket() {
   uint8_t statusMask = 0;
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 3; i++) {
     if (breakerIsOn[i]) {
       statusMask |= (1 << i);
     }
@@ -163,7 +184,7 @@ void sendDataPacket() {
   float systemCurrent = readCurrent(dcSystem_currentSensorPin);
   float load1Current = readCurrent(dcLoad_currentSensorPin);
 
-  uint8_t packet[21];
+  uint8_t packet[17];
   packet[0] = statusMask;
   
   union {
@@ -178,7 +199,6 @@ void sendDataPacket() {
   memcpy(&packet[5], converter.bytes, 4);  // Total Load Current
   memcpy(&packet[9], converter.bytes, 4);  // Load 1 Current
   memcpy(&packet[13], converter.bytes, 4); // Load 2 Current
-  memcpy(&packet[17], converter.bytes, 4); // Load 3 Current
 
   Serial.write(packet, sizeof(packet));
 }

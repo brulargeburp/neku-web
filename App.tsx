@@ -5,27 +5,27 @@ import HistoryModal from './components/HistoryModal';
 import type { Breaker, HistoryLog } from './types';
 
 // --- Data Protocol ---
-// INCOMING: 21-byte packet from device
-// Byte 0:    Status Mask (Bit 0: Overall, Bit 1: Load 1, etc.)
+// INCOMING: 17-byte packet from device
+// Byte 0:    Status Mask (Bit 0: Overall, Bit 1: Load 1, Bit 2: Load 2)
 // Bytes 1-4:   System Current (Float32)
 // Bytes 5-8:   Total Load Current (Float32)
 // Bytes 9-12:  Load 1 Current (Float32)
 // Bytes 13-16: Load 2 Current (Float32)
-// Bytes 17-20: Load 3 Current (Float32)
-const EXPECTED_PACKET_LENGTH = 21;
+const EXPECTED_PACKET_LENGTH = 17;
 
 // OUTGOING: Command packets to device
 // CMD_TOGGLE_STATE (3 bytes): [0x01, breakerIndex, newState (0 or 1)]
 // CMD_SET_MAX_CURRENT (6 bytes): [0x02, breakerIndex, maxCurrent (Float32)]
+// CMD_SET_MIN_CURRENT (6 bytes): [0x03, breakerIndex, minCurrent (Float32)]
 const CMD_TOGGLE_STATE = 0x01;
 const CMD_SET_MAX_CURRENT = 0x02;
+const CMD_SET_MIN_CURRENT = 0x03;
 
 
 const INITIAL_BREAKERS: Breaker[] = [
-  { id: 'overall', name: 'Overall Breaker', isOn: false, current1Label: 'System Current', current2Label: 'Total Load', current1: 0, current2: 0, isOverall: true },
-  { id: 'load1', name: 'Load 1', isOn: false, current1Label: 'Load Current', current2Label: 'Max Current', current1: 0, current2: 0, isOverall: false, maxCurrent: 5.0 },
-  { id: 'load2', name: 'Load 2', isOn: false, current1Label: 'Load Current', current2Label: 'Max Current', current1: 0, current2: 0, isOverall: false, maxCurrent: 5.0 },
-  { id: 'load3', name: 'Load 3', isOn: false, current1Label: 'Load Current', current2Label: 'Max Current', current1: 0, current2: 0, isOverall: false, maxCurrent: 5.0 },
+  { id: 'overall', name: 'Overall Breaker', isOn: false, current1Label: 'System Current', current2Label: 'Total Load', current1: 0, current2: 0, isOverall: true, lastTripReason: 'Manual' },
+  { id: 'load1', name: 'Load 1', isOn: false, current1Label: 'Load Current', current2Label: 'Max Current', current1: 0, current2: 0, isOverall: false, maxCurrent: 5.0, minCurrent: 0.1, lastTripReason: 'Manual' },
+  { id: 'load2', name: 'Load 2', isOn: false, current1Label: 'Load Current', current2Label: 'Max Current', current1: 0, current2: 0, isOverall: false, maxCurrent: 5.0, minCurrent: 0.1, lastTripReason: 'Manual' },
 ];
 
 const App: React.FC = () => {
@@ -36,6 +36,7 @@ const App: React.FC = () => {
   const [isHistoryVisible, setIsHistoryVisible] = useState<boolean>(false);
   const [historyLogs, setHistoryLogs] = useState<HistoryLog[]>([]);
   const [isDebugMode, setIsDebugMode] = useState<boolean>(false);
+  const [isAdminMode, setIsAdminMode] = useState<boolean>(false);
   
   const portRef = useRef<SerialPort | null>(null);
   const writerRef = useRef<WritableStreamDefaultWriter<Uint8Array> | null>(null);
@@ -100,8 +101,6 @@ const App: React.FC = () => {
                 current1 = value.getFloat32(9, true);
             } else if (i === 2) {
                 current1 = value.getFloat32(13, true);
-            } else if (i === 3) {
-                current1 = value.getFloat32(17, true);
             }
             return { ...b, isOn, current1, current2 };
         });
@@ -109,11 +108,12 @@ const App: React.FC = () => {
         const newLogEntries: HistoryLog[] = [];
         newBreakers.forEach((newBreaker, index) => {
           const oldBreaker = prevBreakers[index];
-          if (oldBreaker.isOn !== newBreaker.isOn) { // State has changed
+          if (oldBreaker.isOn !== newBreaker.isOn) {
             newLogEntries.push({
               breakerName: newBreaker.name,
               timestamp: new Date().toISOString(),
               type: newBreaker.isOn ? 'activated' : 'deactivated',
+              reason: newBreaker.isOn ? 'Device Update' : 'Device Trip',
             });
           }
         });
@@ -204,36 +204,36 @@ const App: React.FC = () => {
       setBreakers(prevBreakers => {
         const toggledIndex = prevBreakers.findIndex(b => b.id === id);
         if (toggledIndex === -1 || prevBreakers[toggledIndex].isOn === newIsOn) {
-          return prevBreakers; // No change
+          return prevBreakers;
         }
   
         const newLogEntries: HistoryLog[] = [];
         const timestamp = new Date().toISOString();
   
-        // Log the primary toggle event
         newLogEntries.push({
           breakerName: prevBreakers[toggledIndex].name,
           timestamp,
-          type: newIsOn ? 'activated' : 'deactivated'
+          type: newIsOn ? 'activated' : 'deactivated',
+          reason: 'Manual',
         });
         
         let newBreakers = prevBreakers.map((breaker, index) => {
           if (index === toggledIndex) {
-            return { ...breaker, isOn: newIsOn };
+            return { ...breaker, isOn: newIsOn, lastTripReason: 'Manual' };
           }
           return breaker;
         });
   
-        // Handle cascading deactivation from main breaker
         if (toggledIndex === 0 && !newIsOn) {
           newBreakers = newBreakers.map((breaker, index) => {
             if (index > 0 && breaker.isOn) {
               newLogEntries.push({
                 breakerName: breaker.name,
                 timestamp,
-                type: 'deactivated'
+                type: 'deactivated',
+                reason: 'System Off'
               });
-              return { ...breaker, isOn: false };
+              return { ...breaker, isOn: false, lastTripReason: 'System Off' };
             }
             return breaker;
           });
@@ -245,7 +245,6 @@ const App: React.FC = () => {
       return;
     }
     
-    // Serial Port Logic
     const breakerIndex = breakers.findIndex(b => b.id === id);
     if (breakerIndex === -1) return;
 
@@ -271,19 +270,16 @@ const App: React.FC = () => {
     setBreakers(prev => prev.map(b => b.id === id ? { ...b, maxCurrent: newMaxCurrent } : b));
     
     if (isDebugMode) return;
-
     if (!writerRef.current) {
       setError("Device is not connected.");
       return;
     }
-
     try {
       const buffer = new ArrayBuffer(6);
       const view = new DataView(buffer);
       view.setUint8(0, CMD_SET_MAX_CURRENT);
       view.setUint8(1, breakerIndex);
       view.setFloat32(2, newMaxCurrent, true);
-      
       await writerRef.current.write(new Uint8Array(buffer));
     } catch (e) {
       console.error("Failed to send max current command:", e);
@@ -292,7 +288,31 @@ const App: React.FC = () => {
     }
   }, [isDebugMode, handleDisconnect]);
   
-  // Debug Mode Simulation Effect
+  const handleSetMinCurrent = useCallback(async (id: string, newMinCurrent: number) => {
+    const breakerIndex = INITIAL_BREAKERS.findIndex(b => b.id === id);
+    if (breakerIndex === -1 || breakerIndex === 0) return;
+
+    setBreakers(prev => prev.map(b => b.id === id ? { ...b, minCurrent: newMinCurrent } : b));
+
+    if (isDebugMode) return;
+    if (!writerRef.current) {
+      setError("Device is not connected.");
+      return;
+    }
+    try {
+      const buffer = new ArrayBuffer(6);
+      const view = new DataView(buffer);
+      view.setUint8(0, CMD_SET_MIN_CURRENT);
+      view.setUint8(1, breakerIndex);
+      view.setFloat32(2, newMinCurrent, true);
+      await writerRef.current.write(new Uint8Array(buffer));
+    } catch (e) {
+      console.error("Failed to send min current command:", e);
+      setError(`Failed to set min current: ${(e as Error).message}`);
+      handleDisconnect();
+    }
+  }, [isDebugMode, handleDisconnect]);
+
   useEffect(() => {
     if (!isDebugMode) {
       setBreakers(INITIAL_BREAKERS);
@@ -307,13 +327,12 @@ const App: React.FC = () => {
 
         newBreakers.forEach((b: Breaker, i: number) => {
           if (b.isOn) {
-            if (i === 0) { // Overall Breaker
-              b.current1 = 1.0 + (Math.random() - 0.5) * 0.2; // System Current
-            } else { // Minor Loads
-              // Simulate fluctuating current, go higher if maxCurrent is high
+            if (i === 0) {
+              b.current1 = 1.0 + (Math.random() - 0.5) * 0.2;
+            } else {
               const baseCurrent = (b.maxCurrent ?? 5.0) * 0.7;
               b.current1 = baseCurrent + (Math.random() - 0.2) * 2.0;
-              b.current1 = Math.max(0, b.current1); // Ensure it's not negative
+              b.current1 = Math.max(0, b.current1);
               totalLoad += b.current1;
             }
           } else {
@@ -326,15 +345,29 @@ const App: React.FC = () => {
             newBreakers[0].current2 = totalLoad;
         }
 
-        // Simulate auto-trip
         newBreakers.forEach((b: Breaker, i: number) => {
-          if (i > 0 && b.isOn && b.maxCurrent && b.current1 > b.maxCurrent) {
-            newBreakers[i].isOn = false;
-            newLogEntries.push({ 
-              breakerName: b.name, 
-              timestamp: new Date().toISOString(),
-              type: 'deactivated'
-            });
+          if (i > 0 && b.isOn) {
+            let tripped = false;
+            let reason = '';
+            if (b.maxCurrent && b.current1 > b.maxCurrent) {
+              tripped = true;
+              reason = 'Overload';
+            }
+            else if (b.minCurrent && b.current1 > 0.01 && b.current1 < b.minCurrent) {
+              tripped = true;
+              reason = 'Short Circuit';
+            }
+            
+            if (tripped) {
+              newBreakers[i].isOn = false;
+              newBreakers[i].lastTripReason = reason;
+              newLogEntries.push({ 
+                breakerName: b.name, 
+                timestamp: new Date().toISOString(),
+                type: 'deactivated',
+                reason: reason
+              });
+            }
           }
         });
         
@@ -365,6 +398,19 @@ const App: React.FC = () => {
     }
   };
 
+  const handleToggleAdminMode = () => {
+    if (isAdminMode) {
+      setIsAdminMode(false);
+    } else {
+      const password = prompt("Enter admin password to unlock controls:");
+      if (password === 'nekunami_dev') {
+        setIsAdminMode(true);
+      } else if (password !== null) {
+        alert("Incorrect password.");
+      }
+    }
+  };
+
   return (
     <>
       <main className="text-gray-100 min-h-screen w-full flex flex-col items-center justify-center p-4 sm:p-6 md:p-10">
@@ -392,6 +438,22 @@ const App: React.FC = () => {
           </header>
 
           <div className="absolute top-0 right-0 flex items-center space-x-2">
+              <button
+                onClick={handleToggleAdminMode}
+                title={isAdminMode ? "Lock Controls" : "Unlock Controls"}
+                className="p-2 rounded-full text-green-400 hover:bg-green-400/20 transition-colors duration-300"
+                aria-label={isAdminMode ? "Lock editing of current thresholds" : "Unlock editing of current thresholds"}
+              >
+                {isAdminMode ? (
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75M10.5 21a2.25 2.25 0 002.25-2.25V15.375m-2.25 2.25H9a2.25 2.25 0 01-2.25-2.25v-6.75a2.25 2.25 0 012.25-2.25h3.75a2.25 2.25 0 012.25 2.25v6.75a2.25 2.25 0 01-2.25 2.25H10.5" />
+                  </svg>
+                ) : (
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
+                  </svg>
+                )}
+              </button>
               <div className="flex items-center space-x-2 text-green-400">
                 <span className="text-xs font-bold uppercase">Debug</span>
                 <label className="relative inline-flex items-center cursor-pointer">
@@ -412,16 +474,31 @@ const App: React.FC = () => {
           </div>
 
           <div className={`transition-opacity duration-500 ${!isConnected && !isDebugMode ? 'opacity-40 pointer-events-none' : 'opacity-100'}`}>
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 lg:gap-10">
-              {breakers.map(breaker => (
+            <div className="flex flex-col gap-8 lg:gap-10">
+              {breakers.length > 0 && (
                 <BreakerPanel
-                  key={breaker.id}
-                  breaker={breaker}
+                  key={breakers[0].id}
+                  breaker={breakers[0]}
                   onToggle={handleToggle}
                   isMasterOn={breakers[0].isOn}
                   onSetMaxCurrent={handleSetMaxCurrent}
+                  onSetMinCurrent={handleSetMinCurrent}
+                  isAdminMode={isAdminMode}
                 />
-              ))}
+              )}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8 lg:gap-10">
+                {breakers.slice(1).map(breaker => (
+                  <BreakerPanel
+                    key={breaker.id}
+                    breaker={breaker}
+                    onToggle={handleToggle}
+                    isMasterOn={breakers[0].isOn}
+                    onSetMaxCurrent={handleSetMaxCurrent}
+                    onSetMinCurrent={handleSetMinCurrent}
+                    isAdminMode={isAdminMode}
+                  />
+                ))}
+              </div>
             </div>
           </div>
         </div>

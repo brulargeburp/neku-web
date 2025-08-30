@@ -48,9 +48,12 @@ const HistoryModal: React.FC<HistoryModalProps> = ({ isOpen, onClose, logs, onCl
             <ul className="space-y-4">
               {logs.map((log, index) => (
                 <li key={index} className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-gray-900/70 p-4 rounded-lg border border-gray-600/50">
-                  <div>
+                  <div className="flex-grow">
                     <span className={`font-bold ${log.type === 'activated' ? 'text-green-400' : 'text-red-400'}`}>{log.breakerName}</span>
                     <span className="text-gray-300"> was {log.type}.</span>
+                    <p className="text-sm text-gray-400">
+                      Reason: <span className="font-medium">{log.reason}</span>
+                    </p>
                   </div>
                   <div className="text-sm text-gray-400 mt-2 sm:mt-0 sm:ml-4 whitespace-nowrap">
                     {new Date(log.timestamp).toLocaleString()}
