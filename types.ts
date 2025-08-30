@@ -3,12 +3,12 @@ export interface Breaker {
   id: string;
   name: string;
   isOn: boolean;
-  voltage1Label: string;
-  voltage2Label: string;
-  voltage1: number;
-  voltage2: number;
+  current1Label: string;
+  current2Label: string;
+  current1: number;
+  current2: number;
   isOverall: boolean;
-  maxVoltage?: number;
+  maxCurrent?: number;
 }
 
 export interface HistoryLog {

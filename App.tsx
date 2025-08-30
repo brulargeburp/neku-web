@@ -7,25 +7,25 @@ import type { Breaker, HistoryLog } from './types';
 // --- Data Protocol ---
 // INCOMING: 21-byte packet from device
 // Byte 0:    Status Mask (Bit 0: Overall, Bit 1: Load 1, etc.)
-// Bytes 1-4:   System Voltage (Float32)
-// Bytes 5-8:   Total Load (Float32)
-// Bytes 9-12:  Load 1 Voltage (Float32)
-// Bytes 13-16: Load 2 Voltage (Float32)
-// Bytes 17-20: Load 3 Voltage (Float32)
+// Bytes 1-4:   System Current (Float32)
+// Bytes 5-8:   Total Load Current (Float32)
+// Bytes 9-12:  Load 1 Current (Float32)
+// Bytes 13-16: Load 2 Current (Float32)
+// Bytes 17-20: Load 3 Current (Float32)
 const EXPECTED_PACKET_LENGTH = 21;
 
 // OUTGOING: Command packets to device
 // CMD_TOGGLE_STATE (3 bytes): [0x01, breakerIndex, newState (0 or 1)]
-// CMD_SET_MAX_VOLTAGE (6 bytes): [0x02, breakerIndex, maxVoltage (Float32)]
+// CMD_SET_MAX_CURRENT (6 bytes): [0x02, breakerIndex, maxCurrent (Float32)]
 const CMD_TOGGLE_STATE = 0x01;
-const CMD_SET_MAX_VOLTAGE = 0x02;
+const CMD_SET_MAX_CURRENT = 0x02;
 
 
 const INITIAL_BREAKERS: Breaker[] = [
-  { id: 'overall', name: 'Overall Breaker', isOn: false, voltage1Label: 'System Voltage', voltage2Label: 'Total Load', voltage1: 0, voltage2: 0, isOverall: true },
-  { id: 'load1', name: 'Load 1', isOn: false, voltage1Label: 'Load Voltage', voltage2Label: 'Max Voltage', voltage1: 0, voltage2: 0, isOverall: false, maxVoltage: 5.0 },
-  { id: 'load2', name: 'Load 2', isOn: false, voltage1Label: 'Load Voltage', voltage2Label: 'Max Voltage', voltage1: 0, voltage2: 0, isOverall: false, maxVoltage: 5.0 },
-  { id: 'load3', name: 'Load 3', isOn: false, voltage1Label: 'Load Voltage', voltage2Label: 'Max Voltage', voltage1: 0, voltage2: 0, isOverall: false, maxVoltage: 5.0 },
+  { id: 'overall', name: 'Overall Breaker', isOn: false, current1Label: 'System Current', current2Label: 'Total Load', current1: 0, current2: 0, isOverall: true },
+  { id: 'load1', name: 'Load 1', isOn: false, current1Label: 'Load Current', current2Label: 'Max Current', current1: 0, current2: 0, isOverall: false, maxCurrent: 5.0 },
+  { id: 'load2', name: 'Load 2', isOn: false, current1Label: 'Load Current', current2Label: 'Max Current', current1: 0, current2: 0, isOverall: false, maxCurrent: 5.0 },
+  { id: 'load3', name: 'Load 3', isOn: false, current1Label: 'Load Current', current2Label: 'Max Current', current1: 0, current2: 0, isOverall: false, maxCurrent: 5.0 },
 ];
 
 const App: React.FC = () => {
@@ -85,25 +85,25 @@ const App: React.FC = () => {
     try {
       const value = new DataView(data.buffer);
       const statusMask = value.getUint8(0);
-      const systemVoltage = value.getFloat32(1, true);
+      const systemCurrent = value.getFloat32(1, true);
 
       setBreakers(prevBreakers => {
         const newBreakers: Breaker[] = prevBreakers.map((b, i) => {
             const isOn = (statusMask & (1 << i)) > 0;
-            let voltage1 = b.voltage1;
-            let voltage2 = b.voltage2;
+            let current1 = b.current1;
+            let current2 = b.current2;
 
             if (i === 0) { // Overall
-                voltage1 = systemVoltage;
-                voltage2 = value.getFloat32(5, true);
+                current1 = systemCurrent;
+                current2 = value.getFloat32(5, true);
             } else if (i === 1) {
-                voltage1 = value.getFloat32(9, true);
+                current1 = value.getFloat32(9, true);
             } else if (i === 2) {
-                voltage1 = value.getFloat32(13, true);
+                current1 = value.getFloat32(13, true);
             } else if (i === 3) {
-                voltage1 = value.getFloat32(17, true);
+                current1 = value.getFloat32(17, true);
             }
-            return { ...b, isOn, voltage1, voltage2 };
+            return { ...b, isOn, current1, current2 };
         });
 
         const newLogEntries: HistoryLog[] = [];
@@ -264,11 +264,11 @@ const App: React.FC = () => {
     }
   }, [isDebugMode, breakers, addHistoryLogs, handleDisconnect]);
 
-  const handleSetMaxVoltage = useCallback(async (id: string, newMaxVoltage: number) => {
+  const handleSetMaxCurrent = useCallback(async (id: string, newMaxCurrent: number) => {
     const breakerIndex = INITIAL_BREAKERS.findIndex(b => b.id === id);
     if (breakerIndex === -1 || breakerIndex === 0) return;
 
-    setBreakers(prev => prev.map(b => b.id === id ? { ...b, maxVoltage: newMaxVoltage } : b));
+    setBreakers(prev => prev.map(b => b.id === id ? { ...b, maxCurrent: newMaxCurrent } : b));
     
     if (isDebugMode) return;
 
@@ -280,14 +280,14 @@ const App: React.FC = () => {
     try {
       const buffer = new ArrayBuffer(6);
       const view = new DataView(buffer);
-      view.setUint8(0, CMD_SET_MAX_VOLTAGE);
+      view.setUint8(0, CMD_SET_MAX_CURRENT);
       view.setUint8(1, breakerIndex);
-      view.setFloat32(2, newMaxVoltage, true);
+      view.setFloat32(2, newMaxCurrent, true);
       
       await writerRef.current.write(new Uint8Array(buffer));
     } catch (e) {
-      console.error("Failed to send max voltage command:", e);
-      setError(`Failed to set max voltage: ${(e as Error).message}`);
+      console.error("Failed to send max current command:", e);
+      setError(`Failed to set max current: ${(e as Error).message}`);
       handleDisconnect();
     }
   }, [isDebugMode, handleDisconnect]);
@@ -308,27 +308,27 @@ const App: React.FC = () => {
         newBreakers.forEach((b: Breaker, i: number) => {
           if (b.isOn) {
             if (i === 0) { // Overall Breaker
-              b.voltage1 = 12.0 + (Math.random() - 0.5) * 0.2; // System Voltage
+              b.current1 = 1.0 + (Math.random() - 0.5) * 0.2; // System Current
             } else { // Minor Loads
-              // Simulate fluctuating voltage, go higher if maxVoltage is high
-              const baseVoltage = (b.maxVoltage ?? 5.0) * 0.7;
-              b.voltage1 = baseVoltage + (Math.random() - 0.2) * 2.0;
-              b.voltage1 = Math.max(0, b.voltage1); // Ensure it's not negative
-              totalLoad += b.voltage1;
+              // Simulate fluctuating current, go higher if maxCurrent is high
+              const baseCurrent = (b.maxCurrent ?? 5.0) * 0.7;
+              b.current1 = baseCurrent + (Math.random() - 0.2) * 2.0;
+              b.current1 = Math.max(0, b.current1); // Ensure it's not negative
+              totalLoad += b.current1;
             }
           } else {
-            b.voltage1 = 0;
-            if (i === 0) b.voltage2 = 0;
+            b.current1 = 0;
+            if (i === 0) b.current2 = 0;
           }
         });
         
         if (newBreakers[0].isOn) {
-            newBreakers[0].voltage2 = totalLoad;
+            newBreakers[0].current2 = totalLoad;
         }
 
         // Simulate auto-trip
         newBreakers.forEach((b: Breaker, i: number) => {
-          if (i > 0 && b.isOn && b.maxVoltage && b.voltage1 > b.maxVoltage) {
+          if (i > 0 && b.isOn && b.maxCurrent && b.current1 > b.maxCurrent) {
             newBreakers[i].isOn = false;
             newLogEntries.push({ 
               breakerName: b.name, 
@@ -419,7 +419,7 @@ const App: React.FC = () => {
                   breaker={breaker}
                   onToggle={handleToggle}
                   isMasterOn={breakers[0].isOn}
-                  onSetMaxVoltage={handleSetMaxVoltage}
+                  onSetMaxCurrent={handleSetMaxCurrent}
                 />
               ))}
             </div>

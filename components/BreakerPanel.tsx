@@ -6,26 +6,26 @@ interface BreakerPanelProps {
   breaker: Breaker;
   onToggle: (id: string, newState: boolean) => void;
   isMasterOn: boolean;
-  onSetMaxVoltage: (id: string, value: number) => void;
+  onSetMaxCurrent: (id: string, value: number) => void;
 }
 
-const BreakerPanel: React.FC<BreakerPanelProps> = ({ breaker, onToggle, isMasterOn, onSetMaxVoltage }) => {
-  const { id, name, isOn, voltage1Label, voltage2Label, voltage1, voltage2, isOverall, maxVoltage } = breaker;
+const BreakerPanel: React.FC<BreakerPanelProps> = ({ breaker, onToggle, isMasterOn, onSetMaxCurrent }) => {
+  const { id, name, isOn, current1Label, current2Label, current1, current2, isOverall, maxCurrent } = breaker;
 
-  const [editableMaxVoltage, setEditableMaxVoltage] = useState<string>(maxVoltage?.toFixed(2) ?? '5.00');
+  const [editableMaxCurrent, setEditableMaxCurrent] = useState<string>(maxCurrent?.toFixed(2) ?? '5.00');
 
   useEffect(() => {
     // Sync local state if the prop changes from above
-    setEditableMaxVoltage(maxVoltage?.toFixed(2) ?? '5.00');
-  }, [maxVoltage]);
+    setEditableMaxCurrent(maxCurrent?.toFixed(2) ?? '5.00');
+  }, [maxCurrent]);
 
-  const handleMaxVoltageBlur = () => {
-    const value = parseFloat(editableMaxVoltage);
-    if (!isNaN(value) && value >= 0 && value !== maxVoltage) {
-      onSetMaxVoltage(id, value);
+  const handleMaxCurrentBlur = () => {
+    const value = parseFloat(editableMaxCurrent);
+    if (!isNaN(value) && value >= 0 && value !== maxCurrent) {
+      onSetMaxCurrent(id, value);
     } else {
       // Revert to original value if input is invalid or unchanged
-      setEditableMaxVoltage(maxVoltage?.toFixed(2) ?? '5.00');
+      setEditableMaxCurrent(maxCurrent?.toFixed(2) ?? '5.00');
     }
   };
 
@@ -68,36 +68,36 @@ const BreakerPanel: React.FC<BreakerPanelProps> = ({ breaker, onToggle, isMaster
         {isOverall ? (
           <>
             <div className="bg-gray-900/70 p-4 rounded-lg border border-gray-600/50">
-              <h3 className="text-gray-400 text-xs font-light uppercase tracking-widest mb-2">{voltage1Label}</h3>
+              <h3 className="text-gray-400 text-xs font-light uppercase tracking-widest mb-2">{current1Label}</h3>
               <div className="font-orbitron text-3xl text-green-400 drop-shadow-[0_0_5px_#00ff7f]">
-                {voltage1.toFixed(2)} V
+                {current1.toFixed(2)} A
               </div>
             </div>
             <div className="bg-gray-900/70 p-4 rounded-lg border border-gray-600/50">
-              <h3 className="text-gray-400 text-xs font-light uppercase tracking-widest mb-2">{voltage2Label}</h3>
+              <h3 className="text-gray-400 text-xs font-light uppercase tracking-widest mb-2">{current2Label}</h3>
               <div className="font-orbitron text-3xl text-green-400 drop-shadow-[0_0_5px_#00ff7f]">
-                {voltage2.toFixed(2)} V
+                {current2.toFixed(2)} A
               </div>
             </div>
           </>
         ) : (
           <>
             <div className="bg-gray-900/70 p-4 rounded-lg border border-gray-600/50">
-              <h3 className="text-gray-400 text-xs font-light uppercase tracking-widest mb-2">Load Voltage</h3>
+              <h3 className="text-gray-400 text-xs font-light uppercase tracking-widest mb-2">Load Current</h3>
               <div className="font-orbitron text-3xl text-green-400 drop-shadow-[0_0_5px_#00ff7f]">
-                {voltage1.toFixed(2)} V
+                {current1.toFixed(2)} A
               </div>
             </div>
             <div className="bg-gray-900/70 p-4 rounded-lg border border-gray-600/50">
-              <h3 className="text-gray-400 text-xs font-light uppercase tracking-widest mb-2">Max Voltage</h3>
+              <h3 className="text-gray-400 text-xs font-light uppercase tracking-widest mb-2">Max Current</h3>
               <input
                 type="number"
-                value={editableMaxVoltage}
-                onChange={(e) => setEditableMaxVoltage(e.target.value)}
-                onBlur={handleMaxVoltageBlur}
+                value={editableMaxCurrent}
+                onChange={(e) => setEditableMaxCurrent(e.target.value)}
+                onBlur={handleMaxCurrentBlur}
                 onKeyDown={handleKeyDown}
                 className="font-orbitron text-3xl text-green-400 bg-transparent w-full text-center outline-none p-0 border-0 drop-shadow-[0_0_5px_#00ff7f]"
-                aria-label="Set maximum voltage"
+                aria-label="Set maximum current"
                 step="0.1"
                 min="0"
               />
