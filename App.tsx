@@ -4,23 +4,15 @@ import BreakerPanel from './components/BreakerPanel';
 import HistoryModal from './components/HistoryModal';
 import type { Breaker, HistoryLog } from './types';
 
-// --- Data Protocol ---
-// INCOMING: 17-byte packet from device
-// Byte 0:    Status Mask (Bit 0: Overall, Bit 1: Load 1, Bit 2: Load 2)
-// Bytes 1-4:   System Current (Float32)
-// Bytes 5-8:   Total Load Current (Float32)
-// Bytes 9-12:  Load 1 Current (Float32)
-// Bytes 13-16: Load 2 Current (Float32)
-const EXPECTED_PACKET_LENGTH = 17;
+// --- Data Protocol (Text-based) ---
+// INCOMING: A single string line ending in '\n' from the device.
+// Format: "statusMask|systemCurrent|totalLoadCurrent|load1Current|load2Current"
+// Example: "3|1.25|0.80|0.80|0.00"
 
-// OUTGOING: Command packets to device
-// CMD_TOGGLE_STATE (3 bytes): [0x01, breakerIndex, newState (0 or 1)]
-// CMD_SET_MAX_CURRENT (6 bytes): [0x02, breakerIndex, maxCurrent (Float32)]
-// CMD_SET_MIN_CURRENT (6 bytes): [0x03, breakerIndex, minCurrent (Float32)]
-const CMD_TOGGLE_STATE = 0x01;
-const CMD_SET_MAX_CURRENT = 0x02;
-const CMD_SET_MIN_CURRENT = 0x03;
-
+// OUTGOING: Command strings to the device, ending in '\n'.
+// Toggle State: "T,breakerIndex,newState" (e.g., "T,1,1")
+// Set Max Current: "M,breakerIndex,maxCurrent" (e.g., "M,1,4.5")
+// Set Min Current: "m,breakerIndex,minCurrent" (e.g., "m,1,0.2")
 
 const INITIAL_BREAKERS: Breaker[] = [
   { id: 'overall', name: 'Overall Breaker', isOn: false, current1Label: 'System Current', current2Label: 'Total Load', current1: 0, current2: 0, isOverall: true, lastTripReason: 'Manual' },
@@ -42,6 +34,9 @@ const App: React.FC = () => {
   const writerRef = useRef<WritableStreamDefaultWriter<Uint8Array> | null>(null);
   const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
   const keepReadingRef = useRef<boolean>(false);
+  const lineBufferRef = useRef<string>('');
+  const textDecoder = useRef(new TextDecoder('utf-8'));
+  const textEncoder = useRef(new TextEncoder());
 
   useEffect(() => {
     try {
@@ -54,7 +49,7 @@ const App: React.FC = () => {
     }
   }, []);
 
-  const addHistoryLogs = useCallback((newLogEntries: HistoryLog[]) => {
+    const addHistoryLogs = useCallback((newLogEntries: HistoryLog[]) => {
       if (newLogEntries.length > 0) {
         setHistoryLogs(currentLogs => {
           const updatedLogs = [...newLogEntries.reverse(), ...currentLogs];
@@ -68,87 +63,209 @@ const App: React.FC = () => {
       }
   }, []);
 
+  useEffect(() => {
+    if (isDebugMode) {
+      const intervalId = window.setInterval(() => {
+        setBreakers(prev => {
+          const newLogEntries: HistoryLog[] = [];
+          const timestamp = new Date().toISOString();
+
+          const newLoad1Current = Math.random() * 6.0; // Increased range to test trips
+          const newLoad2Current = Math.random() * 6.0;
+          const totalLoad = newLoad1Current + newLoad2Current;
+          const systemCurrent = totalLoad + (Math.random() * 0.5);
+
+          let intermediateBreakers = prev.map(b => {
+            if (b.id === 'overall') {
+              return { ...b, current1: systemCurrent, current2: totalLoad };
+            }
+            if (b.id === 'load1') {
+              return { ...b, current1: newLoad1Current };
+            }
+            if (b.id === 'load2') {
+              return { ...b, current1: newLoad2Current };
+            }
+            return b;
+          });
+
+          const finalBreakers = intermediateBreakers.map(b => {
+            if (b.isOverall || !b.isOn) return b;
+
+            let tripReason: string | null = null;
+            if (b.maxCurrent && b.current1 >= b.maxCurrent) {
+              tripReason = 'Overload';
+            } else if (b.minCurrent && b.current1 > 0 && b.current1 < b.minCurrent) {
+              tripReason = 'Short Circuit';
+            }
+
+            if (tripReason) {
+              newLogEntries.push({ breakerName: b.name, timestamp, type: 'deactivated', reason: tripReason });
+              return { ...b, isOn: false, lastTripReason: tripReason };
+            }
+            return b;
+          });
+          
+          if (newLogEntries.length > 0) {
+            addHistoryLogs(newLogEntries);
+          }
+          return finalBreakers;
+        });
+      }, 1200);
+
+      return () => clearInterval(intervalId);
+    } else {
+        if (!isConnected) {
+            setBreakers(INITIAL_BREAKERS);
+        }
+    }
+  }, [isDebugMode, isConnected, addHistoryLogs]);
+
   const onDisconnected = useCallback(() => {
     setIsConnected(false);
     writerRef.current = null;
     readerRef.current = null;
     portRef.current = null;
+    lineBufferRef.current = '';
     setBreakers(INITIAL_BREAKERS);
     console.log('Device disconnected.');
   }, []);
-
-  const handleStatusUpdate = (data: Uint8Array) => {
-    if (data.length < EXPECTED_PACKET_LENGTH) {
-      console.warn("Received incomplete data packet.");
-      return;
+  
+  const writeCommand = async (command: string) => {
+    if (!writerRef.current) {
+      // Don't show an error here, as it can be called during normal trip logic
+      // and we don't want to spam the user if they're not connected.
+      return false;
     }
-
     try {
-      const value = new DataView(data.buffer);
-      const statusMask = value.getUint8(0);
-      const systemCurrent = value.getFloat32(1, true);
+      const encoded = textEncoder.current.encode(command);
+      await writerRef.current.write(encoded);
+      return true;
+    } catch (e) {
+      console.error(`Failed to send command "${command}":`, e);
+      setError(`Failed to send command: ${(e as Error).message}`);
+      handleDisconnect();
+      return false;
+    }
+  };
+
+  const parseAndProcessLine = (line: string) => {
+    try {
+      const parts = line.split('|');
+      if (parts.length < 5) {
+        console.warn("Received incomplete data line:", line);
+        return;
+      }
+
+      const statusMask = parseInt(parts[0], 10);
+      const systemCurrent = parseFloat(parts[1]);
+      const totalLoad = parseFloat(parts[2]);
+      const load1Current = parseFloat(parts[3]);
+      const load2Current = parseFloat(parts[4]);
 
       setBreakers(prevBreakers => {
-        const newBreakers: Breaker[] = prevBreakers.map((b, i) => {
-            const isOn = (statusMask & (1 << i)) > 0;
-            let current1 = b.current1;
-            let current2 = b.current2;
-
-            if (i === 0) { // Overall
-                current1 = systemCurrent;
-                current2 = value.getFloat32(5, true);
-            } else if (i === 1) {
-                current1 = value.getFloat32(9, true);
-            } else if (i === 2) {
-                current1 = value.getFloat32(13, true);
-            }
-            return { ...b, isOn, current1, current2 };
+        const newLogEntries: HistoryLog[] = [];
+        
+        const breakersWithNewCurrents = prevBreakers.map((b, i) => {
+            let current1 = b.current1, current2 = b.current2;
+            if (i === 0) { current1 = systemCurrent; current2 = totalLoad; }
+            else if (i === 1) { current1 = load1Current; }
+            else if (i === 2) { current1 = load2Current; }
+            return { ...b, current1, current2 };
         });
 
-        const newLogEntries: HistoryLog[] = [];
-        newBreakers.forEach((newBreaker, index) => {
-          const oldBreaker = prevBreakers[index];
-          if (oldBreaker.isOn !== newBreaker.isOn) {
-            newLogEntries.push({
-              breakerName: newBreaker.name,
-              timestamp: new Date().toISOString(),
-              type: newBreaker.isOn ? 'activated' : 'deactivated',
-              reason: newBreaker.isOn ? 'Device Update' : 'Device Trip',
-            });
-          }
+        const newBreakers = breakersWithNewCurrents.map((b, i) => {
+            const oldIsOn = prevBreakers[i].isOn;
+            let isOn = (statusMask & (1 << i)) > 0;
+            let lastTripReason = b.lastTripReason;
+            let reasonForChange: string | null = null;
+
+            if (oldIsOn) {
+                if (b.maxCurrent && b.current1 >= b.maxCurrent) {
+                    reasonForChange = 'Overload';
+                } else if (b.minCurrent && b.current1 > 0 && b.current1 < b.minCurrent) {
+                    reasonForChange = 'Short Circuit';
+                }
+
+                if (reasonForChange) {
+                    isOn = false; // Force turn off, overriding status from device
+                    const breakerIndex = INITIAL_BREAKERS.findIndex(ib => ib.id === b.id);
+                    if (breakerIndex > 0) {
+                        writeCommand(`T,${breakerIndex},0\n`);
+                    }
+                }
+            }
+
+            if (oldIsOn !== isOn) {
+                const timestamp = new Date().toISOString();
+                if (isOn) {
+                    newLogEntries.push({ breakerName: b.name, timestamp, type: 'activated', reason: 'Manual' });
+                } else {
+                    if (!reasonForChange) {
+                        const previousState = prevBreakers[i];
+                        if (prevBreakers[0].isOn && !(statusMask & 1)) {
+                            reasonForChange = 'System Off';
+                        } else if (!previousState.isOverall && previousState.maxCurrent && previousState.current1 >= previousState.maxCurrent) {
+                            reasonForChange = 'Overload';
+                        } else if (!previousState.isOverall && previousState.minCurrent && previousState.current1 > 0 && previousState.current1 < previousState.minCurrent) {
+                            reasonForChange = 'Short Circuit';
+                        } else {
+                            reasonForChange = 'Manual';
+                        }
+                    }
+                    lastTripReason = reasonForChange;
+                    newLogEntries.push({ breakerName: b.name, timestamp, type: 'deactivated', reason: reasonForChange });
+                }
+            }
+            return { ...b, isOn, lastTripReason };
         });
         
         addHistoryLogs(newLogEntries);
         return newBreakers;
       });
     } catch (e) {
-      console.error("Failed to parse status update:", e);
+      console.error("Failed to parse status update line:", line, e);
       setError("Received malformed data from device.");
     }
   };
   
-  const readLoop = async () => {
-    while (portRef.current?.readable && keepReadingRef.current) {
-        readerRef.current = portRef.current.readable.getReader();
-        try {
-            while (true) {
-                const { value, done } = await readerRef.current.read();
-                if (done) {
-                    break;
-                }
-                handleStatusUpdate(value);
-            }
-        } catch (error) {
-            console.error('Read loop error:', error);
-            setError('Device communication error.');
-        } finally {
-            if (readerRef.current) {
-              readerRef.current.releaseLock();
-              readerRef.current = null;
-            }
+  const processData = (chunk: string) => {
+    lineBufferRef.current += chunk;
+    let newlineIndex;
+    while ((newlineIndex = lineBufferRef.current.indexOf('\n')) !== -1) {
+        const line = lineBufferRef.current.slice(0, newlineIndex).trim();
+        lineBufferRef.current = lineBufferRef.current.slice(newlineIndex + 1);
+        if (line) {
+            parseAndProcessLine(line);
         }
     }
-  }
+  };
+
+  const readLoop = async () => {
+    if (!portRef.current?.readable) return;
+
+    readerRef.current = portRef.current.readable.getReader();
+
+    while (keepReadingRef.current) {
+        try {
+            const { value, done } = await readerRef.current.read();
+            if (done) break;
+            const textChunk = textDecoder.current.decode(value, { stream: true });
+            processData(textChunk);
+        } catch (error) {
+            if (keepReadingRef.current) {
+                console.error("Fatal read error, connection likely lost.", error);
+            }
+            break;
+        }
+    }
+
+    if (readerRef.current) {
+        try { 
+            readerRef.current.releaseLock();
+        } catch(e) { /* Lock might already have been released. */ }
+        readerRef.current = null;
+    }
+  };
 
   const handleConnect = async () => {
     if (!('serial' in navigator)) {
@@ -161,6 +278,8 @@ const App: React.FC = () => {
     try {
       const port = await navigator.serial.requestPort();
       await port.open({ baudRate: 9600 });
+      
+      await new Promise(resolve => setTimeout(resolve, 250));
       
       portRef.current = port;
       port.addEventListener('disconnect', onDisconnected);
@@ -180,7 +299,7 @@ const App: React.FC = () => {
       setIsConnecting(false);
     }
   };
-
+  
   const handleDisconnect = async () => {
     keepReadingRef.current = false;
     
@@ -193,6 +312,7 @@ const App: React.FC = () => {
         catch (e) { console.warn("Error closing writer", e); }
     }
     if (portRef.current) {
+        portRef.current.removeEventListener('disconnect', onDisconnected);
         try { await portRef.current.close(); } 
         catch(e) { console.warn("Error closing port", e); }
     }
@@ -247,21 +367,9 @@ const App: React.FC = () => {
     
     const breakerIndex = breakers.findIndex(b => b.id === id);
     if (breakerIndex === -1) return;
-
-    if (!writerRef.current) {
-        setError("Device is not connected.");
-        return;
-    }
-
-    try {
-        const command = new Uint8Array([CMD_TOGGLE_STATE, breakerIndex, newIsOn ? 1 : 0]);
-        await writerRef.current.write(command);
-    } catch (e) {
-        console.error("Failed to send toggle command:", e);
-        setError(`Failed to send command: ${(e as Error).message}`);
-        handleDisconnect();
-    }
-  }, [isDebugMode, breakers, addHistoryLogs, handleDisconnect]);
+    const command = `T,${breakerIndex},${newIsOn ? 1 : 0}\n`;
+    await writeCommand(command);
+  }, [isDebugMode, breakers, addHistoryLogs]);
 
   const handleSetMaxCurrent = useCallback(async (id: string, newMaxCurrent: number) => {
     const breakerIndex = INITIAL_BREAKERS.findIndex(b => b.id === id);
@@ -270,23 +378,9 @@ const App: React.FC = () => {
     setBreakers(prev => prev.map(b => b.id === id ? { ...b, maxCurrent: newMaxCurrent } : b));
     
     if (isDebugMode) return;
-    if (!writerRef.current) {
-      setError("Device is not connected.");
-      return;
-    }
-    try {
-      const buffer = new ArrayBuffer(6);
-      const view = new DataView(buffer);
-      view.setUint8(0, CMD_SET_MAX_CURRENT);
-      view.setUint8(1, breakerIndex);
-      view.setFloat32(2, newMaxCurrent, true);
-      await writerRef.current.write(new Uint8Array(buffer));
-    } catch (e) {
-      console.error("Failed to send max current command:", e);
-      setError(`Failed to set max current: ${(e as Error).message}`);
-      handleDisconnect();
-    }
-  }, [isDebugMode, handleDisconnect]);
+    const command = `M,${breakerIndex},${newMaxCurrent.toFixed(3)}\n`;
+    await writeCommand(command);
+  }, [isDebugMode]);
   
   const handleSetMinCurrent = useCallback(async (id: string, newMinCurrent: number) => {
     const breakerIndex = INITIAL_BREAKERS.findIndex(b => b.id === id);
@@ -295,221 +389,123 @@ const App: React.FC = () => {
     setBreakers(prev => prev.map(b => b.id === id ? { ...b, minCurrent: newMinCurrent } : b));
 
     if (isDebugMode) return;
-    if (!writerRef.current) {
-      setError("Device is not connected.");
-      return;
-    }
+    const command = `m,${breakerIndex},${newMinCurrent.toFixed(3)}\n`;
+    await writeCommand(command);
+  }, [isDebugMode]);
+  
+  const clearHistory = () => {
+    setHistoryLogs([]);
     try {
-      const buffer = new ArrayBuffer(6);
-      const view = new DataView(buffer);
-      view.setUint8(0, CMD_SET_MIN_CURRENT);
-      view.setUint8(1, breakerIndex);
-      view.setFloat32(2, newMinCurrent, true);
-      await writerRef.current.write(new Uint8Array(buffer));
+      localStorage.removeItem('nekuNamiHistory');
     } catch (e) {
-      console.error("Failed to send min current command:", e);
-      setError(`Failed to set min current: ${(e as Error).message}`);
-      handleDisconnect();
-    }
-  }, [isDebugMode, handleDisconnect]);
-
-  useEffect(() => {
-    if (!isDebugMode) {
-      setBreakers(INITIAL_BREAKERS);
-      return;
-    }
-
-    const simulationInterval = setInterval(() => {
-      setBreakers(prev => {
-        const newBreakers = JSON.parse(JSON.stringify(prev));
-        const newLogEntries: HistoryLog[] = [];
-        let totalLoad = 0;
-
-        newBreakers.forEach((b: Breaker, i: number) => {
-          if (b.isOn) {
-            if (i === 0) {
-              b.current1 = 1.0 + (Math.random() - 0.5) * 0.2;
-            } else {
-              const baseCurrent = (b.maxCurrent ?? 5.0) * 0.7;
-              b.current1 = baseCurrent + (Math.random() - 0.2) * 2.0;
-              b.current1 = Math.max(0, b.current1);
-              totalLoad += b.current1;
-            }
-          } else {
-            b.current1 = 0;
-            if (i === 0) b.current2 = 0;
-          }
-        });
-        
-        if (newBreakers[0].isOn) {
-            newBreakers[0].current2 = totalLoad;
-        }
-
-        newBreakers.forEach((b: Breaker, i: number) => {
-          if (i > 0 && b.isOn) {
-            let tripped = false;
-            let reason = '';
-            if (b.maxCurrent && b.current1 > b.maxCurrent) {
-              tripped = true;
-              reason = 'Overload';
-            }
-            else if (b.minCurrent && b.current1 > 0.01 && b.current1 < b.minCurrent) {
-              tripped = true;
-              reason = 'Short Circuit';
-            }
-            
-            if (tripped) {
-              newBreakers[i].isOn = false;
-              newBreakers[i].lastTripReason = reason;
-              newLogEntries.push({ 
-                breakerName: b.name, 
-                timestamp: new Date().toISOString(),
-                type: 'deactivated',
-                reason: reason
-              });
-            }
-          }
-        });
-        
-        addHistoryLogs(newLogEntries);
-        return newBreakers;
-      });
-    }, 1200);
-
-    return () => clearInterval(simulationInterval);
-  }, [isDebugMode, addHistoryLogs]);
-
-  useEffect(() => {
-    return () => {
-        if (portRef.current) {
-            handleDisconnect();
-        }
-    };
-  }, [handleDisconnect]);
-
-  const handleClearHistory = () => {
-    if (window.confirm('Are you sure you want to permanently delete all history logs?')) {
-        setHistoryLogs([]);
-        try {
-            localStorage.removeItem('nekuNamiHistory');
-        } catch (e) {
-            console.error("Failed to clear history logs from localStorage", e);
-        }
+      console.error("Failed to clear history from localStorage", e);
     }
   };
-
-  const handleToggleAdminMode = () => {
-    if (isAdminMode) {
-      setIsAdminMode(false);
-    } else {
-      const password = prompt("Enter admin password to unlock controls:");
-      if (password === 'nekunami_dev') {
+  
+  const handleAdminModeToggle = () => {
+    if (!isAdminMode) {
+      const password = prompt("Admin Mode requires a password:");
+      if (password === "nekunami_dev") {
         setIsAdminMode(true);
       } else if (password !== null) {
-        alert("Incorrect password.");
+        alert("Incorrect password. Access denied.");
       }
+    } else {
+      setIsAdminMode(false);
     }
   };
 
+  const masterBreaker = breakers[0];
+
   return (
-    <>
-      <main className="text-gray-100 min-h-screen w-full flex flex-col items-center justify-center p-4 sm:p-6 md:p-10">
-        <div className="max-w-7xl w-full relative">
-          <header className="text-center mb-8">
-              <h1 className="font-orbitron text-3xl sm:text-4xl text-green-400 mb-4 tracking-wider uppercase">Neku-Nami Control Panel</h1>
-              <div className="h-10">
-                {!isDebugMode && (
-                  <>
-                    {!isConnected && !isConnecting && (
-                        <button onClick={handleConnect} className="font-orbitron text-white font-bold py-3 px-6 rounded-lg bg-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.4)] hover:bg-blue-400 hover:shadow-[0_0_20px_rgba(59,130,246,0.6)] transition-all duration-300">
-                          Connect via Serial Port
-                        </button>
-                    )}
-                    {isConnecting && <p className="text-yellow-400 text-lg animate-pulse">Connecting...</p>}
-                    {isConnected && (
-                        <button onClick={handleDisconnect} className="font-orbitron text-white font-bold py-3 px-6 rounded-lg bg-red-500 shadow-[0_0_15px_rgba(255,65,65,0.4)] hover:bg-red-400 hover:shadow-[0_0_20px_rgba(255,65,65,0.6)] transition-all duration-300">
-                          Disconnect
-                        </button>
-                    )}
-                  </>
-                )}
-              </div>
-              {error && !isDebugMode && <p className="text-red-500 mt-2 h-5">{error}</p>}
-          </header>
-
-          <div className="absolute top-0 right-0 flex items-center space-x-2">
-              <button
-                onClick={handleToggleAdminMode}
-                title={isAdminMode ? "Lock Controls" : "Unlock Controls"}
-                className="p-2 rounded-full text-green-400 hover:bg-green-400/20 transition-colors duration-300"
-                aria-label={isAdminMode ? "Lock editing of current thresholds" : "Unlock editing of current thresholds"}
-              >
-                {isAdminMode ? (
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75M10.5 21a2.25 2.25 0 002.25-2.25V15.375m-2.25 2.25H9a2.25 2.25 0 01-2.25-2.25v-6.75a2.25 2.25 0 012.25-2.25h3.75a2.25 2.25 0 012.25 2.25v6.75a2.25 2.25 0 01-2.25 2.25H10.5" />
-                  </svg>
-                ) : (
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
-                  </svg>
-                )}
-              </button>
-              <div className="flex items-center space-x-2 text-green-400">
-                <span className="text-xs font-bold uppercase">Debug</span>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input type="checkbox" checked={isDebugMode} onChange={() => setIsDebugMode(!isDebugMode)} className="sr-only peer" />
-                  <div className="w-11 h-6 bg-gray-600 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-600"></div>
-                </label>
-              </div>
-              <button
-                onClick={() => setIsHistoryVisible(true)}
-                title="View Activation History"
-                className="p-2 rounded-full text-green-400 hover:bg-green-400/20 transition-colors duration-300"
-                aria-label="View history"
-              >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-              </button>
-          </div>
-
-          <div className={`transition-opacity duration-500 ${!isConnected && !isDebugMode ? 'opacity-40 pointer-events-none' : 'opacity-100'}`}>
-            <div className="flex flex-col gap-8 lg:gap-10">
-              {breakers.length > 0 && (
-                <BreakerPanel
-                  key={breakers[0].id}
-                  breaker={breakers[0]}
-                  onToggle={handleToggle}
-                  isMasterOn={breakers[0].isOn}
-                  onSetMaxCurrent={handleSetMaxCurrent}
-                  onSetMinCurrent={handleSetMinCurrent}
-                  isAdminMode={isAdminMode}
-                />
-              )}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8 lg:gap-10">
-                {breakers.slice(1).map(breaker => (
-                  <BreakerPanel
-                    key={breaker.id}
-                    breaker={breaker}
-                    onToggle={handleToggle}
-                    isMasterOn={breakers[0].isOn}
-                    onSetMaxCurrent={handleSetMaxCurrent}
-                    onSetMinCurrent={handleSetMinCurrent}
-                    isAdminMode={isAdminMode}
-                  />
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-      </main>
+    <div className="bg-[#1a1a1a] min-h-screen text-gray-100 p-4 sm:p-6 lg:p-8">
       <HistoryModal
         isOpen={isHistoryVisible}
         onClose={() => setIsHistoryVisible(false)}
         logs={historyLogs}
-        onClearHistory={handleClearHistory}
+        onClearHistory={clearHistory}
       />
-    </>
+      <header className="flex flex-col sm:flex-row justify-between items-center mb-8">
+        <h1 className="font-orbitron text-4xl text-green-400 drop-shadow-[0_0_10px_#00ff7f] tracking-widest mb-4 sm:mb-0">
+          Neku-Nami Control
+        </h1>
+        <div className="flex items-center space-x-4">
+           <button 
+            onClick={() => setIsHistoryVisible(true)}
+            className="font-orbitron text-sm text-white font-bold py-2 px-4 rounded-lg bg-gray-700/50 border border-green-400/30 hover:bg-gray-600/70 transition-colors"
+            aria-label="View activation history"
+          >
+            HISTORY
+          </button>
+          <button
+            onClick={isConnected ? handleDisconnect : handleConnect}
+            disabled={isConnecting}
+            className={`font-orbitron text-sm text-white font-bold py-2 px-4 rounded-lg transition-all duration-300 ${
+              isConnected
+                ? 'bg-red-500 shadow-[0_0_10px_rgba(255,65,65,0.4)] hover:bg-red-400'
+                : 'bg-green-500 shadow-[0_0_10px_rgba(0,255,127,0.4)] hover:bg-green-400'
+            } disabled:bg-gray-600/50 disabled:shadow-none disabled:cursor-wait`}
+            aria-live="polite"
+          >
+            {isConnecting ? 'CONNECTING...' : isConnected ? 'DISCONNECT' : 'CONNECT'}
+          </button>
+        </div>
+      </header>
+      
+      {error && (
+        <div className="bg-red-900/50 border border-red-500 text-red-300 p-4 rounded-lg mb-6 text-center" role="alert">
+          {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <BreakerPanel
+          breaker={masterBreaker}
+          onToggle={handleToggle}
+          isMasterOn={true}
+          onSetMaxCurrent={handleSetMaxCurrent}
+          onSetMinCurrent={handleSetMinCurrent}
+          isAdminMode={isAdminMode}
+        />
+        {breakers.slice(1).map(breaker => (
+          <BreakerPanel
+            key={breaker.id}
+            breaker={breaker}
+            onToggle={handleToggle}
+            isMasterOn={masterBreaker.isOn}
+            onSetMaxCurrent={handleSetMaxCurrent}
+            onSetMinCurrent={handleSetMinCurrent}
+            isAdminMode={isAdminMode}
+          />
+        ))}
+      </div>
+      
+      <footer className="mt-8 text-center text-gray-500 text-xs">
+          <div className="flex justify-center items-center space-x-4 mb-2">
+              <div className="flex items-center space-x-2">
+                  <label htmlFor="admin-mode-toggle">Admin Mode</label>
+                  <input
+                      id="admin-mode-toggle"
+                      type="checkbox"
+                      checked={isAdminMode}
+                      onChange={handleAdminModeToggle}
+                      className="form-checkbox h-4 w-4 text-green-500 bg-gray-800 border-gray-600 rounded focus:ring-green-500"
+                  />
+              </div>
+              <div className="flex items-center space-x-2">
+                  <label htmlFor="debug-mode-toggle">Debug Mode</label>
+                  <input
+                      id="debug-mode-toggle"
+                      type="checkbox"
+                      checked={isDebugMode}
+                      onChange={() => setIsDebugMode(!isDebugMode)}
+                      className="form-checkbox h-4 w-4 text-green-500 bg-gray-800 border-gray-600 rounded focus:ring-green-500"
+                  />
+              </div>
+          </div>
+          <p>Neku-Nami IoT Breaker Interface v1.1.0 | Status: {isConnected ? <span className="text-green-400">Connected</span> : <span className="text-red-500">Disconnected</span>}</p>
+      </footer>
+    </div>
   );
 };
 
