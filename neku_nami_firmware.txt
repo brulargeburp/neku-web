@@ -1,39 +1,43 @@
 
 /**
- * Neku-Nami Control Panel Firmware (Current-Based, Text Protocol)
+ * Neku-Nami Control Panel Firmware (v1.1.0 - SSR Control)
  * 
  * This firmware communicates with the Neku-Nami web application using a
- * human-readable, text-based protocol. It manages three circuit breakers, 
- * reads sensor data, and supports real-time configuration of trip thresholds.
+ * human-readable, text-based protocol. It manages two independent circuit breakers
+ * via Solid State Relays (SSRs), reads sensor data for each load, and supports 
+ * real-time configuration of trip thresholds.
  * 
  * --- Web App Communication Protocol (Text-based) ---
  * 
  * ---> Outgoing Data Packet to Web App --->
  * A single string line ending in a newline character ('\n').
  * Format: "statusMask|systemCurrent|totalLoadCurrent|load1Current|load2Current"
- * Example: "3|1.25|0.80|0.80|0.00"
+ * Example: "6|1.55|1.55|0.80|0.75"
+ * - statusMask bit 0: Overall status (logical OR of loads)
+ * - statusMask bit 1: Load 1 status
+ * - statusMask bit 2: Load 2 status
  *
  * <--- Incoming Command Packets from Web App <---
  * Commands are simple strings ending in a newline character ('\n').
  * 1. Toggle State: "T,breakerIndex,newState" 
  *    (e.g., "T,1,1" to turn Load 1 ON)
+ *    (e.g., "T,0,0" to turn ALL loads OFF)
  * 2. Set Max Current: "M,breakerIndex,maxCurrent"
  *    (e.g., "M,1,4.5" to set Load 1 max current to 4.5A)
  * 3. Set Min Current: "m,breakerIndex,minCurrent"
  *    (e.g., "m,1,0.2" to set Load 1 min current to 0.2A)
  */
 
-// --- Pin Definitions (assuming ammeters like ACS712) ---
-const int dcLoad_currentSensorPin = A0;
-const int dcSystem_currentSensorPin = A1;
-const int transistorPinLoad1 = 2;
-const int transistorPinOverall = 3;
-const int transistorPinLoad2 = 4;
+// --- Pin Definitions ---
+const int load1_currentSensorPin = A0; // Ammeter for Load 1
+const int load2_currentSensorPin = A1; // Ammeter for Load 2
+const int ssrPinLoad1 = 8;             // SSR for Load 1
+const int ssrPinLoad2 = 13;            // SSR for Load 2
 
-// --- State Management ---
-bool breakerIsOn[3] = {false, false, false};
-float maxCurrents[3] = {0.0, 5.0, 5.0}; // Default max current for Loads 1 & 2 is 5.0A
-float minCurrents[3] = {0.0, 0.1, 0.1}; // Default min current for Loads 1 & 2 is 0.1A
+// --- State Management (2 Loads) ---
+bool breakerIsOn[2] = {false, false};
+float maxCurrents[2] = {5.0, 5.0}; // Default max current for Loads 1 & 2 is 5.0A
+float minCurrents[2] = {0.1, 0.1}; // Default min current for Loads 1 & 2 is 0.1A
 
 // --- Calibration Values (example for ACS712-20A) ---
 const float sensorOffset = 2.5; 
@@ -45,12 +49,11 @@ const long sendInterval = 100;
 
 void setup() {
   Serial.begin(9600);
-  pinMode(transistorPinLoad1, OUTPUT);
-  pinMode(transistorPinOverall, OUTPUT);
-  pinMode(transistorPinLoad2, OUTPUT);
-  digitalWrite(transistorPinLoad1, HIGH);
-  digitalWrite(transistorPinOverall, HIGH);
-  digitalWrite(transistorPinLoad2, HIGH);
+  pinMode(ssrPinLoad1, OUTPUT);
+  pinMode(ssrPinLoad2, OUTPUT);
+  // SSRs are typically active-low. HIGH = OFF.
+  digitalWrite(ssrPinLoad1, HIGH);
+  digitalWrite(ssrPinLoad2, HIGH);
 }
 
 void loop() {
@@ -83,73 +86,78 @@ void handleSerialCommands() {
     int firstComma = payload.indexOf(',');
     if (firstComma == -1) return;
 
-    int breakerIndex = payload.substring(0, firstComma).toInt();
+    int webAppIndex = payload.substring(0, firstComma).toInt();
     String valueStr = payload.substring(firstComma + 1);
 
     if (commandType == 'T') {
       bool newState = (valueStr.toInt() == 1);
-      setBreakerState(breakerIndex, newState);
-    } else if (commandType == 'M') {
-      float newMax = valueStr.toFloat();
-      if (breakerIndex > 0 && breakerIndex < 3) {
-        maxCurrents[breakerIndex] = newMax;
+      if (webAppIndex == 0) { // Overall breaker command
+        if (!newState) { // Turn everything off
+          setBreakerState(0, false);
+          setBreakerState(1, false);
+        }
+        // "ON" command for overall breaker is ignored, as it's a logical state.
+        // Individual loads must be turned on explicitly.
+      } else if (webAppIndex > 0 && webAppIndex < 3) {
+        int firmwareIndex = webAppIndex - 1;
+        setBreakerState(firmwareIndex, newState);
       }
-    } else if (commandType == 'm') {
-      float newMin = valueStr.toFloat();
-       if (breakerIndex > 0 && breakerIndex < 3) {
-        minCurrents[breakerIndex] = newMin;
+    } else if (commandType == 'M' || commandType == 'm') {
+      if (webAppIndex > 0 && webAppIndex < 3) {
+        int firmwareIndex = webAppIndex - 1;
+        float value = valueStr.toFloat();
+        if (commandType == 'M') {
+          maxCurrents[firmwareIndex] = value;
+        } else { // 'm'
+          minCurrents[firmwareIndex] = value;
+        }
       }
     }
   }
 }
 
 void updateBreakerLogic() {
-  float dcLoad_current = readCurrent(dcLoad_currentSensorPin);
+  // Check Load 1
+  if (breakerIsOn[0]) {
+    float load1Current = readCurrent(load1_currentSensorPin);
+    if (load1Current >= maxCurrents[0] || (load1Current > 0 && load1Current < minCurrents[0])) {
+      setBreakerState(0, false);
+    }
+  }
+
+  // Check Load 2
   if (breakerIsOn[1]) {
-    if (dcLoad_current >= maxCurrents[1] || (dcLoad_current > 0 && dcLoad_current < minCurrents[1])) {
+    float load2Current = readCurrent(load2_currentSensorPin);
+    if (load2Current >= maxCurrents[1] || (load2Current > 0 && load2Current < minCurrents[1])) {
       setBreakerState(1, false);
     }
   }
 }
 
 void setBreakerState(int index, bool isOn) {
-  if (index < 0 || index > 2) return;
+  if (index < 0 || index >= 2) return;
 
-  if (index == 0) {
-    breakerIsOn[0] = isOn;
-    digitalWrite(transistorPinOverall, isOn ? LOW : HIGH);
-    if (!isOn) {
-      for (int i = 1; i < 3; i++) {
-        setBreakerState(i, false);
-      }
-    }
-  } else {
-    if (isOn && !breakerIsOn[0]) {
-      return; 
-    }
-    breakerIsOn[index] = isOn;
-    int pin = (index == 1) ? transistorPinLoad1 : transistorPinLoad2;
-    digitalWrite(pin, isOn ? LOW : HIGH);
-  }
+  breakerIsOn[index] = isOn;
+  int pin = (index == 0) ? ssrPinLoad1 : ssrPinLoad2;
+  digitalWrite(pin, isOn ? LOW : HIGH); // Active LOW for SSR
 }
 
 void sendDataPacket() {
   uint8_t statusMask = 0;
-  for (int i = 0; i < 3; i++) {
-    if (breakerIsOn[i]) {
-      statusMask |= (1 << i);
-    }
-  }
   
-  float systemCurrent = readCurrent(dcSystem_currentSensorPin);
-  float load1Current = readCurrent(dcLoad_currentSensorPin);
-  float load2Current = 0.0; // Placeholder for future sensor
+  if (breakerIsOn[0]) { statusMask |= (1 << 1); } // Load 1 is bit 1
+  if (breakerIsOn[1]) { statusMask |= (1 << 2); } // Load 2 is bit 2
+  if (statusMask > 0) { statusMask |= (1 << 0); } // Overall is bit 0, on if any load is on
+
+  float load1Current = readCurrent(load1_currentSensorPin);
+  float load2Current = readCurrent(load2_currentSensorPin);
   float totalLoadCurrent = load1Current + load2Current;
+  float systemCurrent = totalLoadCurrent; // No separate system sensor
   
   String dataPacket = "";
   dataPacket += String(statusMask);
   dataPacket += "|";
-  dataPacket += String(systemCurrent, 2); // Format to 2 decimal places
+  dataPacket += String(systemCurrent, 2);
   dataPacket += "|";
   dataPacket += String(totalLoadCurrent, 2);
   dataPacket += "|";
