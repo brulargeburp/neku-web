@@ -1,11 +1,15 @@
-
 /**
- * Neku-Nami Control Panel Firmware (v1.1.0 - SSR Control)
+ * Neku-Nami Control Panel Firmware (v1.1.3 - Configurable Grace Period)
  * 
  * This firmware communicates with the Neku-Nami web application using a
  * human-readable, text-based protocol. It manages two independent circuit breakers
  * via Solid State Relays (SSRs), reads sensor data for each load, and supports 
  * real-time configuration of trip thresholds.
+ * 
+ * FIRMWARE UPDATE v1.1.3:
+ * - The 500ms "grace period" is now configurable per-breaker from the web app.
+ *   This allows tuning the trip delay to prevent nuisance trips from inrush current
+ *   while giving the user control over this safety parameter.
  * 
  * --- Web App Communication Protocol (Text-based) ---
  * 
@@ -20,12 +24,10 @@
  * <--- Incoming Command Packets from Web App <---
  * Commands are simple strings ending in a newline character ('\n').
  * 1. Toggle State: "T,breakerIndex,newState" 
- *    (e.g., "T,1,1" to turn Load 1 ON)
- *    (e.g., "T,0,0" to turn ALL loads OFF)
  * 2. Set Max Current: "M,breakerIndex,maxCurrent"
- *    (e.g., "M,1,4.5" to set Load 1 max current to 4.5A)
  * 3. Set Min Current: "m,breakerIndex,minCurrent"
- *    (e.g., "m,1,0.2" to set Load 1 min current to 0.2A)
+ * 4. Set Grace Period: "G,breakerIndex,gracePeriodMs"
+ *    (e.g., "G,1,250" to set Load 1 grace period to 250ms)
  */
 
 // --- Pin Definitions ---
@@ -36,10 +38,12 @@ const int ssrPinLoad2 = 13;            // SSR for Load 2
 
 // --- State Management (2 Loads) ---
 bool breakerIsOn[2] = {false, false};
-float maxCurrents[2] = {5.0, 5.0}; // Default max current for Loads 1 & 2 is 5.0A
-float minCurrents[2] = {0.1, 0.1}; // Default min current for Loads 1 & 2 is 0.1A
+float maxCurrents[2] = {5.0, 5.0};
+float minCurrents[2] = {0.1, 0.1};
+unsigned long breakerActivationTime[2] = {0, 0};
+unsigned int gracePeriodMs[2] = {500, 500}; // Default grace period is 500ms
 
-// --- Calibration Values (example for ACS712-20A) ---
+// --- Current Sensor Calibration (IMPORTANT!) ---
 const float sensorOffset = 2.5; 
 const float sensorSensitivity = 0.100;
 
@@ -51,9 +55,8 @@ void setup() {
   Serial.begin(9600);
   pinMode(ssrPinLoad1, OUTPUT);
   pinMode(ssrPinLoad2, OUTPUT);
-  // SSRs are typically active-low. HIGH = OFF.
-  digitalWrite(ssrPinLoad1, HIGH);
-  digitalWrite(ssrPinLoad2, HIGH);
+  digitalWrite(ssrPinLoad1, LOW);
+  digitalWrite(ssrPinLoad2, LOW);
 }
 
 void loop() {
@@ -91,25 +94,25 @@ void handleSerialCommands() {
 
     if (commandType == 'T') {
       bool newState = (valueStr.toInt() == 1);
-      if (webAppIndex == 0) { // Overall breaker command
-        if (!newState) { // Turn everything off
+      if (webAppIndex == 0) {
+        if (!newState) {
           setBreakerState(0, false);
           setBreakerState(1, false);
         }
-        // "ON" command for overall breaker is ignored, as it's a logical state.
-        // Individual loads must be turned on explicitly.
       } else if (webAppIndex > 0 && webAppIndex < 3) {
         int firmwareIndex = webAppIndex - 1;
         setBreakerState(firmwareIndex, newState);
       }
-    } else if (commandType == 'M' || commandType == 'm') {
+    } else if (commandType == 'M' || commandType == 'm' || commandType == 'G') {
       if (webAppIndex > 0 && webAppIndex < 3) {
         int firmwareIndex = webAppIndex - 1;
-        float value = valueStr.toFloat();
+        
         if (commandType == 'M') {
-          maxCurrents[firmwareIndex] = value;
-        } else { // 'm'
-          minCurrents[firmwareIndex] = value;
+          maxCurrents[firmwareIndex] = valueStr.toFloat();
+        } else if (commandType == 'm') {
+          minCurrents[firmwareIndex] = valueStr.toFloat();
+        } else if (commandType == 'G') {
+          gracePeriodMs[firmwareIndex] = valueStr.toInt();
         }
       }
     }
@@ -118,7 +121,7 @@ void handleSerialCommands() {
 
 void updateBreakerLogic() {
   // Check Load 1
-  if (breakerIsOn[0]) {
+  if (breakerIsOn[0] && (millis() - breakerActivationTime[0] > gracePeriodMs[0])) {
     float load1Current = readCurrent(load1_currentSensorPin);
     if (load1Current >= maxCurrents[0] || (load1Current > 0 && load1Current < minCurrents[0])) {
       setBreakerState(0, false);
@@ -126,7 +129,7 @@ void updateBreakerLogic() {
   }
 
   // Check Load 2
-  if (breakerIsOn[1]) {
+  if (breakerIsOn[1] && (millis() - breakerActivationTime[1] > gracePeriodMs[1])) {
     float load2Current = readCurrent(load2_currentSensorPin);
     if (load2Current >= maxCurrents[1] || (load2Current > 0 && load2Current < minCurrents[1])) {
       setBreakerState(1, false);
@@ -137,22 +140,26 @@ void updateBreakerLogic() {
 void setBreakerState(int index, bool isOn) {
   if (index < 0 || index >= 2) return;
 
+  if (isOn && !breakerIsOn[index]) {
+    breakerActivationTime[index] = millis();
+  }
+
   breakerIsOn[index] = isOn;
   int pin = (index == 0) ? ssrPinLoad1 : ssrPinLoad2;
-  digitalWrite(pin, isOn ? LOW : HIGH); // Active LOW for SSR
+  digitalWrite(pin, isOn ? HIGH : LOW);
 }
 
 void sendDataPacket() {
   uint8_t statusMask = 0;
   
-  if (breakerIsOn[0]) { statusMask |= (1 << 1); } // Load 1 is bit 1
-  if (breakerIsOn[1]) { statusMask |= (1 << 2); } // Load 2 is bit 2
-  if (statusMask > 0) { statusMask |= (1 << 0); } // Overall is bit 0, on if any load is on
+  if (breakerIsOn[0]) { statusMask |= (1 << 1); }
+  if (breakerIsOn[1]) { statusMask |= (1 << 2); }
+  if (statusMask > 0) { statusMask |= (1 << 0); }
 
   float load1Current = readCurrent(load1_currentSensorPin);
   float load2Current = readCurrent(load2_currentSensorPin);
   float totalLoadCurrent = load1Current + load2Current;
-  float systemCurrent = totalLoadCurrent; // No separate system sensor
+  float systemCurrent = totalLoadCurrent;
   
   String dataPacket = "";
   dataPacket += String(statusMask);

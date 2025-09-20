@@ -1,4 +1,3 @@
-
 import React from 'react';
 import type { HistoryLog } from '../types';
 
@@ -23,11 +22,11 @@ const HistoryModal: React.FC<HistoryModalProps> = ({ isOpen, onClose, logs, onCl
       aria-labelledby="history-modal-title"
     >
       <div
-        className="bg-[#282828] w-full max-w-2xl max-h-[80vh] flex flex-col rounded-2xl border border-green-400/30 shadow-2xl shadow-green-500/20 text-gray-100"
+        className="bg-[#282828] w-full max-w-2xl max-h-[80vh] flex flex-col rounded-2xl border border-[#00ff7f]/30 shadow-2xl shadow-[#00ff7f]/20 text-gray-100"
         onClick={(e) => e.stopPropagation()} // Prevent closing modal when clicking inside
       >
         <header className="flex items-center justify-between p-4 border-b border-gray-600/50">
-          <h2 id="history-modal-title" className="font-orbitron text-green-400 text-xl tracking-wider uppercase">
+          <h2 id="history-modal-title" className="font-orbitron text-[#00ff7f] text-xl tracking-wider uppercase">
             Neku-Nami Activation History
           </h2>
           <button
@@ -49,7 +48,7 @@ const HistoryModal: React.FC<HistoryModalProps> = ({ isOpen, onClose, logs, onCl
               {logs.map((log, index) => (
                 <li key={index} className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-gray-900/70 p-4 rounded-lg border border-gray-600/50">
                   <div className="flex-grow">
-                    <span className={`font-bold ${log.type === 'activated' ? 'text-green-400' : 'text-red-400'}`}>{log.breakerName}</span>
+                    <span className={`font-bold ${log.type === 'activated' ? 'text-[#00ff7f]' : 'text-[#ff4141]'}`}>{log.breakerName}</span>
                     <span className="text-gray-300"> was {log.type}.</span>
                     <p className="text-sm text-gray-400">
                       Reason: <span className="font-medium">{log.reason}</span>

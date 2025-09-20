@@ -10,6 +10,7 @@ export interface Breaker {
   isOverall: boolean;
   maxCurrent?: number;
   minCurrent?: number;
+  gracePeriodMs?: number;
   lastTripReason?: string;
 }
 
