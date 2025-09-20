@@ -54,7 +54,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
       aria-labelledby="settings-modal-title"
     >
       <div
-        className="bg-[#282828] w-full max-w-md rounded-2xl border border-[#00ff7f]/30 shadow-2xl shadow-[#00ff7f]/20 text-gray-100 flex flex-col"
+        className="bg-[#282828] w-full max-w-md max-h-[90vh] rounded-2xl border border-[#00ff7f]/30 shadow-2xl shadow-[#00ff7f]/20 text-gray-100 flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         <header className="flex items-center justify-between p-4 border-b border-gray-600/50">

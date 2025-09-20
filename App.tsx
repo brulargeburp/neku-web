@@ -3,6 +3,7 @@ import BreakerPanel from './components/BreakerPanel';
 import HistoryModal from './components/HistoryModal';
 import SettingsModal from './components/SettingsModal';
 import AboutModal from './components/AboutModal';
+import LoginPage from './components/LoginPage';
 import type { Breaker, HistoryLog } from './types';
 
 // --- Data Protocol (Text-based) ---
@@ -23,6 +24,7 @@ const INITIAL_BREAKERS: Breaker[] = [
 ];
 
 const App: React.FC = () => {
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [breakers, setBreakers] = useState<Breaker[]>(INITIAL_BREAKERS);
   const [isConnecting, setIsConnecting] = useState<boolean>(false);
   const [isConnected, setIsConnected] = useState<boolean>(false);
@@ -559,6 +561,10 @@ const App: React.FC = () => {
     }
   }, []);
 
+  if (!isAuthenticated) {
+    return <LoginPage onLoginSuccess={() => setIsAuthenticated(true)} />;
+  }
+
   const masterBreaker = breakers[0];
 
   return (
@@ -698,7 +704,7 @@ const App: React.FC = () => {
                   />
               </div>
           </div>
-          <p>Neku-Nami IoT Breaker Interface v1.1.0 | Status: {isConnected ? <span className="text-[#00ff7f]">Connected</span> : <span className="text-[#ff4141]">Disconnected</span>}</p>
+          <p>Neku-Nami IoT Breaker Interface v1.5 | Status: {isConnected ? <span className="text-[#00ff7f]">Connected</span> : <span className="text-[#ff4141]">Disconnected</span>}</p>
       </footer>
     </div>
   );
